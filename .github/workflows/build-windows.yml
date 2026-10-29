@@ -27,6 +27,13 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
+      # electron-builder 产物文件名的版本号取自 package.json，需从 tag 同步
+      # （Windows runner 默认 PowerShell，${VAR#V} 是 bash 语法，须指定 shell: bash）
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: npm version "${GITHUB_REF_NAME#V}" --no-git-tag-version --allow-same-version
+
       - name: Build Windows x64 installer
         run: npx electron-builder --win nsis --x64 --publish never
 

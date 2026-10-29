@@ -23,6 +23,38 @@ const APP_USER_AGENT = (() => {
     return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
 })();
 
+// 窗口尺寸跟随登录状态：登录页保持默认小尺寸，登录成功自动切换为大尺寸
+// 用户在登录期间调整的尺寸只在该次会话内自然保持，登出/重新登录后重置为默认
+const LOGIN_WINDOW_SIZE = { width: 1000, height: 770 };
+const APP_WINDOW_SIZE = { width: 1300, height: 850 };
+
+// 未登录时飞书会重定向到 accounts 子域或 /login 路径
+function isLoginUrl(url) {
+    if (typeof url !== 'string' || url === '') return false;
+    try {
+        const u = new URL(url);
+        return u.hostname.startsWith('accounts.') || u.pathname.includes('/login');
+    } catch (e) {
+        return url.toLowerCase().includes('/login');
+    }
+}
+
+// 应用目标尺寸并居中到窗口当前所在的屏幕（小屏时按工作区封顶）
+function applyWindowSize(win, size) {
+    if (win == null || win.isDestroyed()) return;
+    if (win.isFullScreen()) win.setFullScreen(false);
+    if (win.isMaximized()) win.unmaximize();
+    const workArea = electron.screen.getDisplayMatching(win.getBounds()).workArea;
+    const width = Math.min(size.width, workArea.width);
+    const height = Math.min(size.height, workArea.height);
+    win.setBounds({
+        x: workArea.x + Math.floor((workArea.width - width) / 2),
+        y: workArea.y + Math.floor((workArea.height - height) / 2),
+        width: width,
+        height: height,
+    });
+}
+
 // electron-context-menu 4.x 起为纯 ESM 包，主进程(CommonJS)需用动态 import() 加载
 import('electron-context-menu').then(contextMenu => {
     contextMenu.default({
@@ -67,14 +99,32 @@ let webContents
 
 function createWindow(configJson) {
     mainWindow = new BrowserWindow({
-        width: 1000,
-        height: 770,
+        width: LOGIN_WINDOW_SIZE.width,
+        height: LOGIN_WINDOW_SIZE.height,
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false
         },
         icon: appConf.icon128
     })
+
+    // 登录状态驱动的窗口尺寸切换：
+    // 进入登录页 → 小尺寸；离开登录页(登录成功) → 大尺寸。
+    // 用户调整过的尺寸只在登录后的会话内自然保持，重新登录时重置为默认
+    let windowSizeStage = 'login';
+    mainWindow.webContents.on('did-navigate', (event, url) => {
+        if (isLoginUrl(url)) {
+            if (windowSizeStage !== 'login') {
+                windowSizeStage = 'login';
+                applyWindowSize(mainWindow, LOGIN_WINDOW_SIZE);
+            }
+        } else {
+            if (windowSizeStage !== 'app') {
+                windowSizeStage = 'app';
+                applyWindowSize(mainWindow, APP_WINDOW_SIZE);
+            }
+        }
+    });
 
     // mainWindow.loadFile('index.html')
     // 改为使用loadURL加载飞书地址

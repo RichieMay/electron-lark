@@ -49,7 +49,9 @@
         }
       ],
       "desktop": {
-        "Encoding": "UTF-8"
+        "entry": {
+          "Encoding": "UTF-8"
+        }
       }
     }
   },

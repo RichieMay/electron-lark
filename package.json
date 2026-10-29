@@ -24,21 +24,33 @@
     "electron": "^45.1.0",
     "electron-builder": "^26.18.0"
   },
-  "linux": {
-    "category": "Office",
-    "packageCategory": "Office",
-    "synopsis": "An Electron application for Feishu(Lark)",
-    "icon": "./build/icons",
-    "target": [
-      {
-        "target": "deb",
-        "arch": [
-          "x64"
-        ]
+  "build": {
+    "appId": "com.richiemay.electron-lark",
+    "productName": "ElectronLark",
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ElectronLark"
+    },
+    "linux": {
+      "category": "Office",
+      "packageCategory": "Office",
+      "synopsis": "An Electron application for Feishu(Lark)",
+      "icon": "./build/icons",
+      "target": [
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "desktop": {
+        "Encoding": "UTF-8"
       }
-    ],
-    "desktop": {
-      "Encoding": "UTF-8"
     }
   },
   "dependencies": {

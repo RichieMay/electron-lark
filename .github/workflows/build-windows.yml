@@ -6,9 +6,11 @@ on:
     branches:
       - master
       - main
+    tags:
+      - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:

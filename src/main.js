@@ -14,8 +14,6 @@ const BrowserWindow = electron.BrowserWindow;
 const Notification = electron.Notification;
 const Menu = electron.Menu;
 
-const rightClickContextMenu = require('electron-context-menu');
-
 // 用当前 Chromium 真实版本号生成 UA，只隐藏 Electron 痕迹
 // 硬编码旧版 Chrome UA 会导致飞书文件预览判定浏览器过旧，提示"不支持查看"
 const APP_USER_AGENT = (() => {
@@ -25,18 +23,21 @@ const APP_USER_AGENT = (() => {
     return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
 })();
 
-rightClickContextMenu({
-    showInspectElement: false,
-    showCopyImage: true,
-    showCopyImageAddress: true,
-    showSaveImageAs: true,
-    labels: {
-        copy: '复制',
-        copyImage: '复制图片',
-        copyImageAddress: '复制图片地址',
-        saveImageAs: '图片另存为',
-    },
-});
+// electron-context-menu 4.x 起为纯 ESM 包，主进程(CommonJS)需用动态 import() 加载
+import('electron-context-menu').then(contextMenu => {
+    contextMenu.default({
+        showInspectElement: false,
+        showCopyImage: true,
+        showCopyImageAddress: true,
+        showSaveImageAs: true,
+        labels: {
+            copy: '复制',
+            copyImage: '复制图片',
+            copyImageAddress: '复制图片地址',
+            saveImageAs: '图片另存为',
+        },
+    });
+}).catch(err => console.error("electron-context-menu 加载失败:", err));
 
 if (process.mas) app.setName('飞书Feishu');
 // fixup High CPU Usage issue

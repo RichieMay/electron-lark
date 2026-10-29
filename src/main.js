@@ -72,6 +72,11 @@ import('electron-context-menu').then(contextMenu => {
 }).catch(err => console.error("electron-context-menu 加载失败:", err));
 
 if (process.mas) app.setName('飞书Feishu');
+// Windows 通知依赖 AUMID，需与 electron-builder NSIS 快捷方式写入的 appId 一致，
+// 否则打包后 Notification 全部静默不弹（消息提醒/更新提示/下载完成都会受影响）
+if (process.platform === 'win32') {
+    app.setAppUserModelId('com.richiemay.electron-lark');
+}
 // fixup High CPU Usage issue
 // see https://github.com/electron/electron/issues/11908
 app.disableHardwareAcceleration();
@@ -407,6 +412,48 @@ function initDownload(){
     })
 }
 
+/**
+ * 按用户配置应用网络代理（config.json 的 proxyMode/proxyPacUrl/proxyServer）
+ * 作用于整个默认会话：飞书页面加载、文件下载、更新检查(electron.net)全部生效
+ *   system: 跟随系统代理（默认，不设置即为此行为）
+ *   pac:    使用 PAC 自动配置脚本
+ *   fixed:  固定代理服务器（http/https/socks4/socks5）
+ *   direct: 所有连接直连
+ */
+function initProxy(configJson){
+    const ses = electron.session.defaultSession
+    const mode = configJson.proxyMode
+
+    if(mode === 'pac'){
+        const pacUrl = (configJson.proxyPacUrl || "").trim()
+        if(pacUrl !== ""){
+            console.log("使用 PAC 代理: " + pacUrl)
+            ses.setProxy({ pacUrl: pacUrl })
+            return
+        }
+        console.log("PAC 模式但未配置脚本地址，回退系统代理")
+    }
+
+    if(mode === 'fixed'){
+        const server = (configJson.proxyServer || "").trim()
+        if(server !== ""){
+            console.log("使用固定代理: " + server)
+            ses.setProxy({ proxyRules: server })
+            return
+        }
+        console.log("fixed 模式但未配置服务器地址，回退系统代理")
+    }
+
+    if(mode === 'direct'){
+        console.log("所有连接直连")
+        ses.setProxy({ mode: 'direct' })
+        return
+    }
+
+    // system 或无效配置：跟随系统代理
+    ses.setProxy({ mode: 'system' })
+}
+
 function getConfigJson(callback){
     fs.readFile('config.json','utf-8',function(err,data){
         if(err){
@@ -559,6 +606,8 @@ app.on('ready', function () {
     // app on 了之后先进行 ajax 请求配置详情，成功之后再 createWindows
     getConfigJson(function (json){
         console.log(json)
+        // 先应用代理配置，再创建窗口，保证首个页面加载就按代理走
+        initProxy(json);
         createWindow(json);
     })
 

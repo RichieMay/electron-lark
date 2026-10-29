@@ -1,6 +1,5 @@
 const appStoreFs = require("fs");
 const path = require('path')
-const https = require('https')
 const electron = require('electron');
 const Notification = electron.Notification;
 
@@ -85,57 +84,69 @@ function checkUpdate(showCheckNotify, successCb){
         successCb = function(){}
     }
 
-    let options = {
-        protocol: 'https:',
-        hostname: 'api.github.com',
-        path: '/repos/RichieMay/electron-lark/releases/latest',
-        headers: {
-          'User-Agent': 'request'
+    function notifyCheckFail(reason){
+        console.log("检查更新失败: " + reason)
+        if(showCheckNotify !== undefined && showCheckNotify) {
+            new Notification({
+                title: "检查更新失败",
+                subtitle : "检查更新失败",
+                body: reason,
+                icon: electron.nativeImage.createFromPath(appConf.dock32),
+            }).show();
         }
     }
-    
-    let resJsonStr = "";
 
-    https.get(options, (res) => {
-        console.log('request github api for check update, status code :' + res.statusCode); 
-        // if(res.statusCode != 200){
-            // return
-        // }   
-        
-        res.on('data', (data) => {
+    // 用 electron.net 发起请求：走 Chromium 网络栈，自动使用系统代理，
+    // 墙内环境下 Node 原生 https 直连 api.github.com 会无限挂起
+    const request = electron.net.request({
+        url: 'https://api.github.com/repos/RichieMay/electron-lark/releases/latest',
+    })
+    request.setHeader('User-Agent', 'electron-lark-update-checker')
+
+    let resJsonStr = "";
+    let finished = false;
+
+    // 15 秒超时，避免网络不通时点击后毫无反应
+    const timeoutTimer = setTimeout(function(){
+        if(finished) return;
+        finished = true;
+        request.abort();
+        notifyCheckFail("请求 Github API 超时，请检查网络");
+    }, 15000);
+
+    request.on('response', (response) => {
+        console.log('request github api for check update, status code :' + response.statusCode);
+        response.on('data', (data) => {
             resJsonStr += String(data);
         });
 
-        res.on('end', () => {
+        response.on('end', () => {
+            if(finished) return;
+            finished = true;
+            clearTimeout(timeoutTimer);
+
             let resJson;
             try{
-                JSON.parse(resJsonStr);
+                resJson = JSON.parse(resJsonStr);
             } catch(e){
                 console.log("resJsonStr 校验错误")
+                notifyCheckFail("Github API 返回数据解析失败");
                 return
             }
-            resJson = JSON.parse(String(resJsonStr));
 
-            if(res.statusCode != 200){
-                if(resJson.message.indexOf("API rate limit exceeded") >= 0) {
-                    if(showCheckNotify !== undefined && showCheckNotify) {
-                        new Notification({
-                            title: "检查更新失败",
-                            subtitle : "检查更新失败",
-                            body : "Github API 请求速度过快，请稍后再试",
-                            icon: electron.nativeImage.createFromPath(appConf.dock32),
-                        }).show();
-                    }    
-                }
-            } else {
-                console.log("请求成功")
-                resJson = JSON.parse(String(resJsonStr));
+            if(response.statusCode != 200){
+                // 任何非 200（限流、404 等）都给出明确提示，不再静默
+                let reason = "Github API 请求失败 (" + response.statusCode + ")";
+                if(resJson.message != null) reason = reason + ": " + resJson.message;
+                notifyCheckFail(reason);
+                successCb();
+                return
             }
-            
+
             let newVersion = String(resJson.tag_name)
                 .trim()
                 .toLocaleLowerCase()
-                .replace("v","");;
+                .replace("v","");
 
             // 只要最新版本和当前版本不一样，就提示更新
             let packageVersion = require(path.join(__dirname, './../package.json'))
@@ -144,27 +155,27 @@ function checkUpdate(showCheckNotify, successCb){
                 .toLocaleLowerCase().replace("v", "");
             console.log("当前版本号:", packageVersion);
             console.log("最新版本号:", newVersion);
-            
+
             if(packageVersion != newVersion) {
                 let updateNotify = new Notification({
                     title: "发现新版本",
-                    subtitle : "发现新版本",
-                    body : "electron-lark 已发现新版本，请前往 github release 页下载",
+                    subtitle: "发现新版本",
+                    body: "electron-lark 已发现新版本，请前往 github release 页下载",
                     icon: electron.nativeImage.createFromPath(appConf.dock32),
                 });
-                
+
                 updateNotify.addListener('click', function(){
                     console.log("open github for download release");
                     electron.shell.openExternal('https://github.com/RichieMay/electron-lark/releases')
                 });
                 updateNotify.show();
-        
+
             } else {
                 if(showCheckNotify !== undefined && showCheckNotify) {
                     new Notification({
                         title: "当前已是最新版本",
-                        subtitle : "当前已是最新版本",
-                        body : "当前 elecron-lark 版本已是最新版本",
+                        subtitle: "当前已是最新版本",
+                        body: "当前 elecron-lark 版本已是最新版本",
                         icon: electron.nativeImage.createFromPath(appConf.dock32),
                     }).show();
                 }
@@ -172,19 +183,18 @@ function checkUpdate(showCheckNotify, successCb){
 
             successCb();
         })
+    });
 
-    }).on('error', (e) => {
+    request.on('error', (e) => {
+        if(finished) return;
+        finished = true;
+        clearTimeout(timeoutTimer);
         console.log("fail in request github api")
         console.error(e);
-        if(showCheckNotify) {
-            new Notification({
-                title: "检查更新失败",
-                subtitle : "检查更新失败",
-                body : e.message,
-                icon: electron.nativeImage.createFromPath(appConf.dock32),
-            }).show(); ;
-        }
+        notifyCheckFail(e.message);
     });
+
+    request.end();
 }
 
 module.exports = {

@@ -100,6 +100,9 @@
                     <li class="mdui-list-item mdui-ripple" onclick="showPage('host-set')">
                         <div class="mdui-list-item-content drawer-item">服务器设置</div>
                     </li>
+                    <li class="mdui-list-item mdui-ripple" onclick="showPage('proxy-set')">
+                        <div class="mdui-list-item-content drawer-item">网络代理</div>
+                    </li>
                     <li class="mdui-list-item mdui-ripple" onclick="showPage('version-info')">
                         <div class="mdui-list-item-content drawer-item">版本信息</div>
                     </li>
@@ -165,6 +168,63 @@
                 </div>
             </div>
 
+            <div v-if="pageShow==='proxy-set'">
+                <div class="set-title-panel">
+                    <p class="doc-title">网络代理</p>
+                </div>
+                <div class="set-content-panel">
+                    <p>设置程序的网络代理，同时作用于飞书页面加载和更新检查</p>
+                    <p>设置完毕请手动重启应用</p>
+                    <p></p>
+
+                    <label class="mdui-radio" style="margin-right: 30px;">
+                        <input type="radio" name="proxy-mode" value="system" v-model="proxyMode">
+                        <i class="mdui-radio-icon"></i>
+                        <span style="margin-left: 6px">系统代理</span>
+                    </label>
+                    <label class="mdui-radio" style="margin-right: 30px;">
+                        <input type="radio" name="proxy-mode" value="pac" v-model="proxyMode">
+                        <i class="mdui-radio-icon"></i>
+                        <span style="margin-left: 6px">PAC 脚本</span>
+                    </label>
+                    <label class="mdui-radio" style="margin-right: 30px;">
+                        <input type="radio" name="proxy-mode" value="fixed" v-model="proxyMode">
+                        <i class="mdui-radio-icon"></i>
+                        <span style="margin-left: 6px">代理服务器</span>
+                    </label>
+                    <label class="mdui-radio">
+                        <input type="radio" name="proxy-mode" value="direct" v-model="proxyMode">
+                        <i class="mdui-radio-icon"></i>
+                        <span style="margin-left: 6px">直连</span>
+                    </label>
+
+                    <div v-if="pageShow==='proxy-set' && proxyMode==='pac'" style="margin-top: 25px;">
+                        <p>PAC 自动配置脚本的网址或本地文件路径</p>
+                        <div class="mdui-textfield">
+                            <textarea class="mdui-textfield-input" rows="2"
+                                      v-model="proxyPacUrl"
+                                      placeholder="例如:&#13;&#10;https://example.com/proxy.pac&#13;&#10;或本地文件: file:///C:/proxy/auto-proxy.pac"></textarea>
+                        </div>
+                        <p class="mdui-text-color-theme-secondary" style="font-size: 13px;">
+                            应用启动时会下载该脚本并根据其规则分流流量
+                        </p>
+                    </div>
+
+                    <div v-if="pageShow==='proxy-set' && proxyMode==='fixed'" style="margin-top: 25px;">
+                        <p>代理服务器地址，支持 http/https/socks4/socks5 协议</p>
+                        <div class="mdui-textfield">
+                            <textarea class="mdui-textfield-input" rows="2"
+                                      v-model="proxyServer"
+                                      placeholder="例如:&#13;&#10;http://192.168.2.1:1081&#13;&#10;socks5://192.168.2.1:1080"></textarea>
+                        </div>
+                    </div>
+
+                    <div v-if="pageShow==='proxy-set' && proxyMode==='direct'" style="margin-top: 25px;">
+                        <p>所有连接直连，不使用任何代理</p>
+                    </div>
+                </div>
+            </div>
+
             <div v-if="pageShow==='version-info'">
                 <div class="set-title-panel">
                     <p class="doc-title">版本信息</p>
@@ -219,6 +279,9 @@
         startPageLink: null, // 启动页设置
         larkOpenLink: null, // 需要在 electron 内打开的链接
         showWarterMark: false,
+        proxyMode: 'system', // 代理模式: system/pac/fixed/direct
+        proxyPacUrl: null, // PAC 脚本地址
+        proxyServer: null, // 固定代理服务器地址
         packageVersion: "未知版本",
     };
 
@@ -260,6 +323,9 @@
                 pageData.startPageLink = configJson.startPageLink;
                 pageData.larkOpenLink = configJson.larkOpenLink;
                 pageData.showWarterMark = configJson.showWarterMark;
+                pageData.proxyMode = configJson.proxyMode || 'system';
+                pageData.proxyPacUrl = configJson.proxyPacUrl;
+                pageData.proxyServer = configJson.proxyServer;
             }
         });
     }
@@ -273,6 +339,9 @@
             startPageLink: pageData.startPageLink,
             larkOpenLink: pageData.larkOpenLink,
             showWarterMark: pageData.showWarterMark,
+            proxyMode: pageData.proxyMode,
+            proxyPacUrl: pageData.proxyPacUrl,
+            proxyServer: pageData.proxyServer,
         }
         appStoreFs.writeFile("config.json",JSON.stringify(configJson, null, "  "),function (err) {
             if(err){

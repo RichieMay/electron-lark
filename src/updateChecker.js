@@ -88,7 +88,7 @@ function checkUpdate(showCheckNotify, successCb){
     let options = {
         protocol: 'https:',
         hostname: 'api.github.com',
-        path: '/repos/Ericwyn/electron-lark/releases/latest',
+        path: '/repos/RichieMay/electron-lark/releases/latest',
         headers: {
           'User-Agent': 'request'
         }
@@ -155,7 +155,7 @@ function checkUpdate(showCheckNotify, successCb){
                 
                 updateNotify.addListener('click', function(){
                     console.log("open github for download release");
-                    electron.shell.openExternal('https://github.com/Ericwyn/electron-lark/releases')
+                    electron.shell.openExternal('https://github.com/RichieMay/electron-lark/releases')
                 });
                 updateNotify.show();
         

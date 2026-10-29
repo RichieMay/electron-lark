@@ -1,8 +1,8 @@
 # Electron-Lark
 
- ![release-download-count](https://img.shields.io/github/downloads/Ericwyn/electron-lark/total.svg)
+ ![release-download-count](https://img.shields.io/github/downloads/RichieMay/electron-lark/total.svg)
 
- ***下载地址: [Release](https://github.com/Ericwyn/electron-lark/releases)***
+ ***下载地址: [Release](https://github.com/RichieMay/electron-lark/releases)***
 
 
 electron 版的飞书 Feishu (原 Lark)，对网页版本进行封装
@@ -100,7 +100,7 @@ electron 版的飞书 Feishu (原 Lark)，对网页版本进行封装
 
 
 ## 安装方法 (二进制安装)
- - 请从 [Release](https://github.com/Ericwyn/electron-lark/releases) 页面直接下载及安装 （ubuntu 18.04 上测试通过）
+ - 请从 [Release](https://github.com/RichieMay/electron-lark/releases) 页面直接下载及安装 （ubuntu 18.04 上测试通过）
 
 ## 安装方法 (从源码安装)
 

@@ -21,12 +21,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      # Electron-Lark uses Electron 15 / electron-builder 22, so use Node 16
-      # for the closest match to its original dependency generation.
+      # electron-context-menu 5.x requires Node >= 24
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 16
+          node-version: 24
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund

@@ -4,6 +4,7 @@ const appConf = require("./configuration")
 
 const electron = require('electron')
 const fs = require('fs')
+const path = require('path')
 const updateChecker = require('./updateChecker')
 
 const shell = electron.shell;
@@ -14,6 +15,15 @@ const Notification = electron.Notification;
 const Menu = electron.Menu;
 
 const rightClickContextMenu = require('electron-context-menu');
+
+// 用当前 Chromium 真实版本号生成 UA，只隐藏 Electron 痕迹
+// 硬编码旧版 Chrome UA 会导致飞书文件预览判定浏览器过旧，提示"不支持查看"
+const APP_USER_AGENT = (() => {
+    const platform = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64'
+        : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7'
+        : 'X11; Linux x86_64';
+    return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
+})();
 
 rightClickContextMenu({
     showInspectElement: false,
@@ -41,7 +51,6 @@ app.on('browser-window-blur', function () {
 app.on('browser-window-focus', function () {
     onFocus = true;
 })
-app.allowRendererProcessReuse = true
 
 let newAppTray = null;
 const dock32Icon = electron.nativeImage.createFromPath(appConf.dock32)
@@ -76,8 +85,7 @@ function createWindow(configJson) {
     }
     console.log("load main page: " + loadUrl)
     mainWindow.loadURL(loadUrl, {
-        userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.116 Safari/537.36'
-        // userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.158 Electron/8.2.0 Safari/537.36"
+        userAgent: APP_USER_AGENT
     })
     webContents = mainWindow.webContents
     mainWindow.on('closed', function () {
@@ -153,19 +161,23 @@ function createWindow(configJson) {
     })
 
     // 定义在 electron 内部打开的 url，除此之外的 url 都跳转浏览器打开，使用 indexOf >= 0 来判断
+    // 飞书域名默认留在应用内打开：文件/预览链接若转交系统浏览器会丢失登录态，报 session key not found
     let electronUrl = [
+        "feishu.cn",
+        "larksuite.com",
     ]
-    if (configJson.larkOpenLink !== undefined && configJson.larkOpenLink !== null){
-        electronUrl = ("" + configJson.larkOpenLink).split("\n")
+    if (configJson.larkOpenLink !== undefined && configJson.larkOpenLink !== null
+        && ("" + configJson.larkOpenLink).trim() !== ""){
+        electronUrl = electronUrl.concat(("" + configJson.larkOpenLink).split("\n"))
     }
 
-    // 设置新窗口的 user agent
-    webContents.on("new-window", function(event, url, frameName, disposition, options, features, referer){
-        // feishu.cn/calendar/ 日历
-        // feishu.cn/space/home/ 文档
+    // 拦截新窗口打开，决定在应用内打开还是跳转系统浏览器
+    // （Electron 22 起移除了 new-window 事件，改用 setWindowOpenHandler）
+    // feishu.cn/calendar/ 日历
+    // feishu.cn/space/home/ 文档
+    webContents.setWindowOpenHandler(({ url }) => {
         console.log("open url " + url)
-        event.preventDefault()
-        
+
         let openInElectron = false
         for(let i=0;i<electronUrl.length; i++){
             if(electronUrl[i].trim() != "" && url.indexOf(electronUrl[i]) >= 0) {
@@ -175,25 +187,25 @@ function createWindow(configJson) {
             }
         }
 
-        if(openInElectron) {
-            // 将所有打开的新页面的 user agent 也重新设置，避免提示浏览器错误
-            const win = new BrowserWindow({
+        if(!openInElectron && url.startsWith("http")) {
+            // 其余链接交给系统默认浏览器打开
+            shell.openExternal(url)
+        }
+        return {
+            action: openInElectron ? 'allow' : 'deny',
+            overrideBrowserWindowOptions: {
                 width: 1200,
                 height: 600,
-              webContents: options.webContents,
-              show: false
-            })
-            win.once('ready-to-show', () => win.show())
-            if (!options.webContents) {
-              win.loadURL(url,{
-                userAgent : "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.116 Safari/537.36"
-              })
+                show: false,
             }
-            event.newGuest = win;
-        } else {
-            shell.openExternal(url)
-            return;
         }
+    })
+
+    // 应用内新窗口（如文件预览页）加载完成后再显示，并统一设置 UA
+    webContents.on("did-create-window", (childWindow) => {
+        // 将所有打开的新页面的 user agent 也重新设置，避免提示浏览器错误
+        childWindow.webContents.setUserAgent(APP_USER_AGENT)
+        childWindow.once('ready-to-show', () => childWindow.show())
     })
 
     // 打开开发者模式
@@ -281,6 +293,66 @@ function appTrayInit(){
         if(mainWindow != null && !mainWindow.isVisible()){
             mainWindow.show()
         }
+    })
+}
+
+/**
+ * 应用内文件下载处理
+ * 飞书页面触发的下载自动保存到系统"下载"目录（同名文件自动加序号，不覆盖），
+ * 下载完成后系统通知，点击通知打开文件所在文件夹
+ */
+function initDownload(){
+    const ses = electron.session.defaultSession
+    // 下载请求由 session 发起，需与页面一致使用新 UA，避免飞书服务端校验失败
+    ses.setUserAgent(APP_USER_AGENT)
+
+    // 新版 Chromium 的通知权限模型要求显式授权，不设置的话
+    // 飞书页面的 Notification 权限会被拒绝，消息通知静默失效
+    ses.setPermissionRequestHandler((webContents, permission, callback) => {
+        // notifications: 页面通知（消息提醒）；fullscreen: 文件预览/视频全屏
+        callback(permission === 'notifications' || permission === 'fullscreen')
+    })
+
+    ses.on('will-download', (event, item) => {
+        const downloadDir = app.getPath('downloads')
+        const filename = item.getFilename() || 'download'
+        let savePath = path.join(downloadDir, filename)
+
+        // 同名文件自动加 " (n)" 后缀，避免覆盖已有文件
+        if (fs.existsSync(savePath)) {
+            const ext = path.extname(filename)
+            const base = filename.slice(0, filename.length - ext.length)
+            let n = 1
+            while (fs.existsSync(path.join(downloadDir, `${base} (${n})${ext}`))) {
+                n++
+            }
+            savePath = path.join(downloadDir, `${base} (${n})${ext}`)
+        }
+        item.setSavePath(savePath)
+        console.log("download save path: " + savePath)
+
+        item.once('done', (e, state) => {
+            if(!Notification.isSupported()) return
+            if(state === 'completed') {
+                let notify = new Notification({
+                    title: "下载完成",
+                    subtitle: "下载完成",
+                    body: filename,
+                    icon: electron.nativeImage.createFromPath(appConf.dock32),
+                });
+                notify.addListener('click', function(){
+                    electron.shell.showItemInFolder(savePath)
+                });
+                notify.show();
+            } else {
+                new Notification({
+                    title: "下载失败",
+                    subtitle: "下载失败",
+                    body: filename + " (" + state + ")",
+                    icon: electron.nativeImage.createFromPath(appConf.dock32Empty),
+                }).show();
+            }
+        })
     })
 }
 
@@ -376,7 +448,7 @@ let menuTemplate = [
             {
                 label: 'Github',
                 click: function () {
-                    require('electron').shell.openExternal('https://github.com/Ericwyn/electron-lark')
+                    require('electron').shell.openExternal('https://github.com/RichieMay/electron-lark')
                 }
             }
         ]
@@ -420,6 +492,9 @@ app.on('ready', function () {
     // 系统托盘设置
     // 托盘图标
     appTrayInit()
+
+    // 应用内文件下载处理
+    initDownload()
 
     // globalShortcut.register('alt+shift+q', () => {
     //     console.log("托盘销毁情况")

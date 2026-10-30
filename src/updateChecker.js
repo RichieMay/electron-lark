@@ -5,9 +5,6 @@ const Notification = electron.Notification;
 
 const appConf = require("./configuration")
 
-// 检查更新的时间间隔，每天只检查一次
-const checkUpdateExpireTime = 3 * 24 * 60 * 60;
-
 let updateCheckJson;
 
 function getConfigJson(callback){
@@ -44,7 +41,7 @@ function saveConfig(){
 
 function checkUpdateInAppStart(){
     // localStorage.
-    
+
     function check(){
         if(updateCheckJson == null){
             console.log("updateCheckJson 为 null")
@@ -52,22 +49,21 @@ function checkUpdateInAppStart(){
         } else {
             console.log(updateCheckJson)
         };
-    
-        
+
+
         let unixTimeStamp = Math.floor(new Date().getTime() / 1000);
         if(updateCheckJson.lastCheckUpdateTimeStamp == null){
             updateCheckJson.lastCheckUpdateTimeStamp = 0;
         } else {
             console.log("上次检查时间:" + updateCheckJson.lastCheckUpdateTimeStamp);
         }
-    
-        if(unixTimeStamp - updateCheckJson.lastCheckUpdateTimeStamp > checkUpdateExpireTime) {
-            console.log("开始检查更新")
-            checkUpdate(false, function(){
-                updateCheckJson.lastCheckUpdateTimeStamp = unixTimeStamp;
-                saveConfig();
-            })    
-        }
+
+        // 每次启动都静默检查（静默模式：无新版/失败都不打扰，仅发现新版本时通知）
+        console.log("启动检查更新")
+        checkUpdate(false, function(){
+            updateCheckJson.lastCheckUpdateTimeStamp = unixTimeStamp;
+            saveConfig();
+        })
     }
 
     if(updateCheckJson == null){
@@ -76,6 +72,42 @@ function checkUpdateInAppStart(){
         check();
     }
 
+}
+
+// ------------------------ 定时检查 --------------------------------
+// 除启动检查外，每天 16:00 再静默检查一次（应用常驻托盘，长时间不重启也能收到新版提醒）
+const DAILY_CHECK_HOUR = 16;
+let dailyCheckTimer = null;
+
+function startDailyUpdateCheck(){
+    // 页面重载等场景可能重复调用，已有定时器则跳过
+    if(dailyCheckTimer != null) return;
+
+    function scheduleNext(){
+        const now = new Date();
+        const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(),
+            DAILY_CHECK_HOUR, 0, 0, 0);
+        // 今天 16 点已过则排到明天
+        if(next.getTime() <= now.getTime()){
+            next.setDate(next.getDate() + 1);
+        }
+        const delay = next.getTime() - now.getTime();
+        console.log("下次定时检查更新: " + next.toLocaleString()
+            + " (约 " + Math.round(delay / 60000) + " 分钟后)");
+        dailyCheckTimer = setTimeout(function(){
+            console.log("定时检查更新")
+            checkUpdate(false, function(){
+                if(updateCheckJson != null){
+                    updateCheckJson.lastCheckUpdateTimeStamp = Math.floor(new Date().getTime() / 1000);
+                    saveConfig();
+                }
+            });
+            // 检查完排下一天
+            scheduleNext();
+        }, delay);
+    }
+
+    scheduleNext();
 }
 
 // 参数代表是否手动触发
@@ -199,5 +231,6 @@ function checkUpdate(showCheckNotify, successCb){
 
 module.exports = {
     checkInAppStart: checkUpdateInAppStart,
+    startDailyCheck: startDailyUpdateCheck,
     check: checkUpdate,
 }

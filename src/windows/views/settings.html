@@ -11,7 +11,7 @@
     <!-- MDUI CSS -->
     <link rel="stylesheet" href="mdui.min.css"/>
 
-    <title>设置</title>
+    <title>系统设置</title>
     <style>
         body{
             padding-top: 20px;
@@ -84,7 +84,7 @@
             </div>
         </div>
         <div style="text-align: center">
-            <p>正在载入设置选项</p>
+            <p>正在载入设置选项...</p>
         </div>
     </div>
     <div v-else class="">
@@ -103,8 +103,8 @@
                     <li class="mdui-list-item mdui-ripple" onclick="showPage('proxy-set')">
                         <div class="mdui-list-item-content drawer-item">网络代理</div>
                     </li>
-                    <li class="mdui-list-item mdui-ripple" onclick="showPage('version-info')">
-                        <div class="mdui-list-item-content drawer-item">版本信息</div>
+                    <li class="mdui-list-item mdui-ripple" onclick="showPage('about-info')">
+                        <div class="mdui-list-item-content drawer-item">关于</div>
                     </li>
                 </ul>
             </div>
@@ -115,14 +115,11 @@
                     <p class="doc-title">服务器设置</p>
                 </div>
                 <div class="set-content-panel">
-                    <p>程序默认打开为网页版飞书登录页面</p>
-                    <p>如果公司使用的是特殊的飞书登录地址</p>
-                    <p>请在下方设置程序启动页面为其他地址</p>
+                    <p>默认网页版飞书登录页，你可在下方设置自定义地址，保存后重启后生效。</p>
                     <p></p>
-                    <p>设置完毕请手动重启应用</p>
                     <div class="mdui-textfield">
                         <textarea class="mdui-textfield-input"
-                                  placeholder="默认为: https://feishu.cn/messenger/"
+                                  placeholder="https://feishu.cn/messenger/"
                                   v-model="startPageLink"></textarea>
                     </div>
 
@@ -143,8 +140,7 @@
                           </label>
                     </label>
                     <br><br>
-                    <p>打开后，将会显示飞书水印</p>
-                    <p>设置完毕请手动重启应用</p>
+                    <p>打开后将会显示飞书水印，保存后重启后生效。</p>
                 </div>
             </div>
 
@@ -153,17 +149,14 @@
                     <p class="doc-title">外链设置</p>
                 </div>
                 <div class="set-content-panel">
-                    <p>此处可设置使用 electron 打开的链接, 每行设置一个链接</p>
-                    <p>electron-lark 会对聊天记录当中打开的每个链接进行 indexOf 判断</p>
-                    <p>如果 URL 包含下方中任意一行的内容，则在 electron 内打开</p>
-                    <p>否则将在浏览器中打开</p>
+                    <p>应用内打开的链接（每行一个），其他链接默认使用系统浏览器打开，保存后重启后生效。</p>
                     <p></p>
-                    <p>设置完毕请手动重启应用</p>
+
                     <div class="mdui-textfield" style="margin-top: 20px;">
                     <textarea class="mdui-textfield-input"
                               v-model="larkOpenLink"
                               style="background: #f1f1f1; padding: 10px" rows="10"
-                              placeholder="请在此处设置需要在 electron 内打开的链接，如&#13;&#10;https://github.com&#13;&#10;https://google.com"></textarea>
+                              placeholder="请在此处设置需在应用内打开的链接，如&#13;&#10;https://github.com&#13;&#10;https://google.com"></textarea>
                     </div>
                 </div>
             </div>
@@ -173,8 +166,7 @@
                     <p class="doc-title">网络代理</p>
                 </div>
                 <div class="set-content-panel">
-                    <p>设置程序的网络代理，同时作用于飞书页面加载和更新检查</p>
-                    <p>设置完毕请手动重启应用</p>
+                    <p>设置应用程序的网络代理，，保存后重启后生效。</p>
                     <p></p>
 
                     <label class="mdui-radio" style="margin-right: 30px;">
@@ -185,17 +177,17 @@
                     <label class="mdui-radio" style="margin-right: 30px;">
                         <input type="radio" name="proxy-mode" value="pac" v-model="proxyMode">
                         <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">PAC 脚本</span>
+                        <span style="margin-left: 6px">自动配置</span>
                     </label>
                     <label class="mdui-radio" style="margin-right: 30px;">
                         <input type="radio" name="proxy-mode" value="fixed" v-model="proxyMode">
                         <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">代理服务器</span>
+                        <span style="margin-left: 6px">手动配置</span>
                     </label>
                     <label class="mdui-radio">
                         <input type="radio" name="proxy-mode" value="direct" v-model="proxyMode">
                         <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">直连</span>
+                        <span style="margin-left: 6px">网络直连</span>
                     </label>
 
                     <div v-if="pageShow==='proxy-set' && proxyMode==='pac'" style="margin-top: 25px;">
@@ -205,9 +197,6 @@
                                       v-model="proxyPacUrl"
                                       placeholder="例如:&#13;&#10;https://example.com/proxy.pac&#13;&#10;或本地文件: file:///C:/proxy/auto-proxy.pac"></textarea>
                         </div>
-                        <p class="mdui-text-color-theme-secondary" style="font-size: 13px;">
-                            应用启动时会下载该脚本并根据其规则分流流量
-                        </p>
                     </div>
 
                     <div v-if="pageShow==='proxy-set' && proxyMode==='fixed'" style="margin-top: 25px;">
@@ -225,32 +214,29 @@
                 </div>
             </div>
 
-            <div v-if="pageShow==='version-info'">
+            <div v-if="pageShow==='about-info'">
                 <div class="set-title-panel">
-                    <p class="doc-title">版本信息</p>
+                    <p class="doc-title">关于</p>
                 </div>
-                <div class="set-content-panel">
-                    <p>当前版本 : <span class="mdui-text-color-pink">{{packageVersion}}</span></p>
+                <div class="set-content-panel" style="text-align: center;">
+                    <img src="../../../icon/128.png" style="width: 72px; height: 72px;"/>
+                    <p style="font-size: 22px; margin-top: 10px;">ElectronLark</p>
+                    <p style="color: #9e9e9e; font-size: 14px;">当前版本 {{packageVersion}}</p>
+                    <p style="color: #616161; font-size: 13px; margin-top: 16px;">基于网页版飞书开发，能满足基础功能使用。</p>
                     <br>
-                    <p>基于网页版飞书的简单套壳，代码粗糙，能用即可</p>
-                    <br>
-                    <p>项目地址: https://github.com/RichieMay/electron-lark</p>
-                    <p>可前往 Release 页面查看并下载最新版本</p>
-                    <br>
-                    <button class="mdui-btn mdui-color-pink mdui-text-color-white" 
-                        onclick="gotoGitub()">前往项目地址</button>
+                    <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
+                        onclick="btnCheckUpdateClick()">检查更新</button>
                     <br><br>
-                    <button class="mdui-btn mdui-color-pink mdui-text-color-white"
-                        onclick="gotoRelease()">前往 Release</button>
-                   
+                    <div>
+                        <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
+                            onclick="gotoProjectHome()">前往项目主页</button>
+                    </div>
                 </div>
             </div>
 
-            <div v-if="pageShow !='version-info'" class="set-save-panel">
+            <div v-if="pageShow !='about-info'" class="set-save-panel">
                 <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
                         onclick="btnSaveClick()">保存设置</button>
-<!--                <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"-->
-<!--                        onclick="btnSaveClick()">重启应用</button>-->
             </div>
 
         </div>
@@ -283,6 +269,7 @@
         proxyPacUrl: null, // PAC 脚本地址
         proxyServer: null, // 固定代理服务器地址
         packageVersion: "未知版本",
+        checkingUpdate: false, // 是否正在检查更新
     };
 
     getConfigJson();
@@ -306,8 +293,33 @@
         pageData.pageShow = page
     }
 
+    // 支持通过 URL hash 直接定位页签（托盘"关于"入口用）
+    try{
+        let hashPage = decodeURIComponent(window.location.hash.replace('#', ''))
+        if(hashPage !== ''){
+            pageData.pageShow = hashPage
+        }
+    }catch(e){}
+
     function btnSaveClick(){
        saveConfig()
+    }
+
+    // 检查更新走主进程 IPC（主进程负责调 updateChecker 并弹通知）
+    function btnCheckUpdateClick(){
+        if(pageData.checkingUpdate) return
+        pageData.checkingUpdate = true
+        mdui.snackbar({ message: '正在检查更新...' })
+        try{
+            require('electron').ipcRenderer.send("check-update")
+        }catch(e){
+            console.log(e)
+            pageData.checkingUpdate = false
+        }
+        // 防止主进程无响应导致按钮永久锁定
+        setTimeout(function(){
+            pageData.checkingUpdate = false
+        }, 20000)
     }
 
     function getConfigJson(){
@@ -360,12 +372,8 @@
         window.close();
     }
 
-    function gotoGitub(){
+    function gotoProjectHome(){
         require('electron').shell.openExternal('https://github.com/RichieMay/electron-lark')
-    }
-
-    function gotoRelease(){
-        require('electron').shell.openExternal('https://github.com/RichieMay/electron-lark/releases')
     }
 
 </script>

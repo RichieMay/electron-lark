@@ -214,6 +214,8 @@ function createWindow(configJson) {
 
             // 在页面加载完成之后，检查新版本信息
             updateChecker.checkInAppStart();
+            // 每天 16:00 定时再静默检查一次
+            updateChecker.startDailyCheck();
     })
 
     // 定义在 electron 内部打开的 url，除此之外的 url 都跳转浏览器打开，使用 indexOf >= 0 来判断
@@ -326,7 +328,22 @@ const trayMenuTemplate = [
         }
     },
     {
-        label: '退出',
+        label: '系统设置',
+        click: function(){
+            openSettingsWindows();
+        }
+    },
+    {
+        label: '关于',
+        click: function(){
+            openSettingsWindows('about-info');
+        }
+    },
+    {
+        type: 'separator'
+    },
+    {
+        label: '退出程序',
         click: function(){
             console.log("从 tray 退出")
             app.quit();
@@ -467,97 +484,17 @@ function getConfigJson(callback){
     });
 }
 
+
 // ------------------------ 程序菜单 --------------------------------
-/**
- * 注册键盘快捷键
- * 其中：label: '切换开发者工具',这个可以在发布时注释掉
- */
-let menuTemplate = [
-    {
-        label: '操作',
-        submenu: [
-            {
-                label: '浏览器打开',
-                click: function (item, focusedWindow) {
-                    console.log("open in browser:" + focusedWindow.webContents.getURL());
-                    require('electron').shell.openExternal(focusedWindow.webContents.getURL())
-                }
-            },
-            {
-                label: '最小化',
-                // accelerator: 'CmdOrCtrl+M',
-                role: 'minimize'
-            }, 
-            // {
-            //     label: '关闭窗口',
-            //     accelerator: 'CmdOrCtrl+W',
-            //     role: 'close'
-            // }, 
-            {
-                label: '退出程序',
-                click: function (item, focusedWindow) {
-                    app.quit();
-                    mainWindow.destroy()
-                    // openSettingsWindows();
-                }
-            }, 
-        ]
-    },
-    {
-        label: '设置',
-        role: 'window',
-        submenu: [
-            {
-                label: '功能设置',
-                click: function (item, focusedWindow) {
-                    openSettingsWindows();
-                }
-            }, 
-            {
-                label: '切换开发者工具',
-                accelerator: (function () {
-                    if (process.platform === 'darwin') {
-                        return 'Alt+Command+I'
-                    } else {
-                        return 'Ctrl+Shift+I'
-                    }
-                })(),
-                click: function (item, focusedWindow) {
-                    if (focusedWindow) {
-                        focusedWindow.toggleDevTools()
-                    }
-                }
-            }, 
-            {
-                type: 'separator'
-            }
-        ]
-    },
-    {
-        label: '帮助',
-        role: 'help',
-        submenu: [
-            {
-                label: '检查新版本',
-                click: function () {
-                    updateChecker.check(true);
-                }
-            },
-            {
-                label: 'Github',
-                click: function () {
-                    require('electron').shell.openExternal('https://github.com/RichieMay/electron-lark')
-                }
-            }
-        ]
-    },
-]
+// 应用不再显示菜单栏（所有入口集中到托盘菜单）
+// 需要开发者工具时可用快捷键 Ctrl+Shift+I
 
 
 /**
  * 打开设置窗口
+ * page 参数为设置页内的页签（如 about-info 直接打开"关于"页），可选
  */
-function openSettingsWindows(){
+function openSettingsWindows(page){
     let settingsWindow = null;
     if(settingsWindow == null) {
         settingsWindow = new BrowserWindow({
@@ -574,19 +511,20 @@ function openSettingsWindows(){
 
         // console.log(settingsWindow)
         // settingsWindow.loadUrl('file://' + __dirname + '/app/settings.html');
-        settingsWindow.loadURL('file://' +__dirname+ '/windows/views/settings.html');
+        settingsWindow.setMenuBarVisibility(false);
+        // 通过 hash 指定初始页签（如 #about-info 直接打开"关于"页）
+        let hash = (page != null && page !== '') ? ('#' + page) : ''
+        settingsWindow.loadURL('file://' +__dirname+ '/windows/views/settings.html' + hash);
         // settingsWindow.toggleDevTools();
     }
 }
 
 // ------------------------ App ------------------------------------
 app.on('ready', function () {
-    
-    // 系统菜单
-    const menu = Menu.buildFromTemplate(menuTemplate)
-    // 设置菜单部分
-    Menu.setApplicationMenu(menu) 
-    
+
+    // 删除菜单栏，所有入口集中到托盘菜单
+    Menu.setApplicationMenu(null)
+
     // 系统托盘设置
     // 托盘图标
     appTrayInit()
@@ -635,6 +573,13 @@ ipcMain.on("notification", (event, msg) => {
     // title 是对话框名称，opt 是聊天的具体内容，想看格式的话可以去掉上面那行注释
     showLarkNotify(args.title, args.opt, args.opt.channelId)
     event.returnValue = 'pong'
+})
+
+// 设置页发起的检查更新请求（通知由 updateChecker 内部弹出）
+ipcMain.on("check-update", (event) => {
+    console.log("收到设置页检查更新请求")
+    updateChecker.check(true);
+    event.returnValue = 'ok'
 })
 
 function showLarkNotify(title, opt, channelId){

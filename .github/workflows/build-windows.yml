@@ -16,19 +16,17 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # electron-context-menu 5.x requires Node >= 24
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      # electron-builder 产物文件名的版本号取自 package.json，需从 tag 同步
-      # （Windows runner 默认 PowerShell，${VAR#V} 是 bash 语法，须指定 shell: bash）
       - name: Sync version from tag
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -38,7 +36,7 @@ jobs:
         run: npx electron-builder --win nsis --x64 --publish never
 
       - name: Upload installer artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: electron-lark-windows-x64
           path: |

@@ -169,47 +169,43 @@
                     <p>设置应用程序的网络代理，，保存后重启后生效。</p>
                     <p></p>
 
-                    <label class="mdui-radio" style="margin-right: 30px;">
-                        <input type="radio" name="proxy-mode" value="system" v-model="proxyMode">
-                        <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">系统代理</span>
-                    </label>
-                    <label class="mdui-radio" style="margin-right: 30px;">
-                        <input type="radio" name="proxy-mode" value="pac" v-model="proxyMode">
-                        <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">自动配置</span>
-                    </label>
-                    <label class="mdui-radio" style="margin-right: 30px;">
-                        <input type="radio" name="proxy-mode" value="fixed" v-model="proxyMode">
-                        <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">手动配置</span>
-                    </label>
-                    <label class="mdui-radio">
+                    <label class="mdui-radio" style="display: block; margin: 14px 0;">
                         <input type="radio" name="proxy-mode" value="direct" v-model="proxyMode">
                         <i class="mdui-radio-icon"></i>
                         <span style="margin-left: 6px">网络直连</span>
                     </label>
-
-                    <div v-if="pageShow==='proxy-set' && proxyMode==='pac'" style="margin-top: 25px;">
-                        <p>PAC 自动配置脚本的网址或本地文件路径</p>
-                        <div class="mdui-textfield">
-                            <textarea class="mdui-textfield-input" rows="2"
-                                      v-model="proxyPacUrl"
-                                      placeholder="例如:&#13;&#10;https://example.com/proxy.pac&#13;&#10;或本地文件: file:///C:/proxy/auto-proxy.pac"></textarea>
-                        </div>
-                    </div>
-
-                    <div v-if="pageShow==='proxy-set' && proxyMode==='fixed'" style="margin-top: 25px;">
-                        <p>代理服务器地址，支持 http/https/socks4/socks5 协议</p>
-                        <div class="mdui-textfield">
-                            <textarea class="mdui-textfield-input" rows="2"
-                                      v-model="proxyServer"
-                                      placeholder="例如:&#13;&#10;http://192.168.2.1:1081&#13;&#10;socks5://192.168.2.1:1080"></textarea>
-                        </div>
-                    </div>
+                    <label class="mdui-radio" style="display: block; margin: 14px 0;">
+                        <input type="radio" name="proxy-mode" value="system" v-model="proxyMode">
+                        <i class="mdui-radio-icon"></i>
+                        <span style="margin-left: 6px">系统代理</span>
+                    </label>
+                    <label class="mdui-radio" style="display: block; margin: 14px 0;">
+                        <input type="radio" name="proxy-mode" value="pac" v-model="proxyMode">
+                        <i class="mdui-radio-icon"></i>
+                        <span style="margin-left: 6px">自动配置（PAC 脚本）</span>
+                    </label>
+                    <label class="mdui-radio" style="display: block; margin: 14px 0;">
+                        <input type="radio" name="proxy-mode" value="fixed" v-model="proxyMode">
+                        <i class="mdui-radio-icon"></i>
+                        <span style="margin-left: 6px">手动配置（代理服务器）</span>
+                    </label>
 
                     <div v-if="pageShow==='proxy-set' && proxyMode==='direct'" style="margin-top: 25px;">
                         <p>所有连接直连，不使用任何代理</p>
+                    </div>
+                    <div v-if="pageShow==='proxy-set' && proxyMode==='pac'" style="margin-top: 25px;">
+                        <div class="mdui-textfield">
+                            <label class="mdui-textfield-label">PAC 脚本网址或本地文件路径</label>
+                            <input class="mdui-textfield-input" type="text" v-model="proxyPacUrl"
+                                   placeholder="https://example.com/proxy.pac 或 file:///C:/proxy/auto-proxy.pac">
+                        </div>
+                    </div>
+                    <div v-if="pageShow==='proxy-set' && proxyMode==='fixed'" style="margin-top: 25px;">
+                        <div class="mdui-textfield">
+                            <label class="mdui-textfield-label">代理服务器地址（支持 http/https/socks4/socks5）</label>
+                            <input class="mdui-textfield-input" type="text" v-model="proxyServer"
+                                   placeholder="http://192.168.2.1:1081 或 socks5://192.168.2.1:1080">
+                        </div>
                     </div>
                 </div>
             </div>

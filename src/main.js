@@ -270,9 +270,6 @@ function createWindow(configJson) {
         childWindow.webContents.setUserAgent(APP_USER_AGENT)
         childWindow.once('ready-to-show', () => childWindow.show())
     })
-
-    // 打开开发者模式
-    // mainWindow.toggleDevTools()
 }
 
 let blingCount = 0;
@@ -574,10 +571,58 @@ ipcMain.on("notification", (event, msg) => {
     event.returnValue = 'pong'
 })
 
-// 设置页发起的检查更新请求（通知由 updateChecker 内部弹出）
+// 设置页发起的检查更新请求
+// 结果仅在主窗口右下角 toast 展示（设置页只保留"正在检查更新"提示）
 ipcMain.on("check-update", (event) => {
     console.log("收到设置页检查更新请求")
-    updateChecker.check(true);
+    updateChecker.check(true, function(){}, function(result){
+        showMainPageToast(result)
+    });
+    event.returnValue = 'ok'
+})
+
+/**
+ * 在主窗口(飞书页面)右下角弹 toast 展示检查结果
+ * 页面环境无 mdui 可用，注入轻量自绘样式；3.5 秒后自动消失
+ */
+function showMainPageToast(result){
+    if(mainWindow == null || mainWindow.isDestroyed() || webContents == null) return
+    let text = ""
+    if(result.type === 'newer'){
+        text = "发现新版本 " + (result.message.match(/[\d.]+.*?$/) || [''])[0] + "，可前往 GitHub 下载"
+    }else if(result.type === 'latest'){
+        text = "当前已是最新版本"
+    }else{
+        text = "检查更新失败：" + result.message
+    }
+    try{
+        webContents.executeJavaScript(`
+            (function(){
+                var old = document.getElementById('elk-update-toast');
+                if(old) old.remove();
+                var toast = document.createElement('div');
+                toast.id = 'elk-update-toast';
+                toast.textContent = ${JSON.stringify(text)};
+                toast.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;'
+                    + 'background:rgba(33,33,33,0.92);color:#fff;padding:12px 20px;border-radius:8px;'
+                    + 'font-size:14px;box-shadow:0 4px 16px rgba(0,0,0,0.3);'
+                    + 'max-width:360px;line-height:1.5;transition:opacity 0.4s;opacity:0;';
+                document.body.appendChild(toast);
+                requestAnimationFrame(function(){ toast.style.opacity = '1'; });
+                setTimeout(function(){ toast.style.opacity = '0'; setTimeout(function(){ toast.remove(); }, 400); }, 3500);
+            })();
+        `)
+    }catch(e){
+        console.log("主窗口 toast 注入失败:", e.message)
+    }
+}
+
+// 设置页"调试模式"按钮：在主窗口打开开发者工具（关闭由用户在 DevTools 面板自行操作）
+ipcMain.on("toggle-devtools", (event, open) => {
+    console.log("收到开发者工具打开请求")
+    if(open === true && mainWindow != null && !mainWindow.isDestroyed()){
+        mainWindow.webContents.openDevTools()
+    }
     event.returnValue = 'ok'
 })
 

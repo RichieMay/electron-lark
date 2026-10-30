@@ -103,6 +103,9 @@
                     <li class="mdui-list-item mdui-ripple" onclick="showPage('proxy-set')">
                         <div class="mdui-list-item-content drawer-item">网络代理</div>
                     </li>
+                    <li class="mdui-list-item mdui-ripple" onclick="showPage('debug-set')">
+                        <div class="mdui-list-item-content drawer-item">调试模式</div>
+                    </li>
                     <li class="mdui-list-item mdui-ripple" onclick="showPage('about-info')">
                         <div class="mdui-list-item-content drawer-item">关于</div>
                     </li>
@@ -210,6 +213,19 @@
                 </div>
             </div>
 
+            <div v-if="pageShow==='debug-set'">
+                <div class="set-title-panel">
+                    <p class="doc-title">调试模式</p>
+                </div>
+                <div class="set-content-panel">
+                    <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
+                        onclick="btnOpenDevToolsClick()">启用开发者工具</button>
+                    <br><br>
+                    <p>点击后在主窗口打开开发者工具，用于排查页面问题</p>
+                    <p>关闭请直接点击开发者工具面板上的关闭按钮</p>
+                </div>
+            </div>
+
             <div v-if="pageShow==='about-info'">
                 <div class="set-title-panel">
                     <p class="doc-title">关于</p>
@@ -230,7 +246,7 @@
                 </div>
             </div>
 
-            <div v-if="pageShow !='about-info'" class="set-save-panel">
+            <div v-if="pageShow !='about-info' && pageShow !='debug-set'" class="set-save-panel">
                 <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
                         onclick="btnSaveClick()">保存设置</button>
             </div>
@@ -278,6 +294,15 @@
         }
     });
 
+    // 调试模式按钮：在主窗口打开开发者工具（关闭由用户在 DevTools 面板自行操作）
+    function btnOpenDevToolsClick(){
+        try{
+            require('electron').ipcRenderer.send("toggle-devtools", true)
+        }catch(e){
+            console.log(e)
+        }
+    }
+
     // 读取版本信息
     try{
         const path = require('path')
@@ -301,11 +326,11 @@
        saveConfig()
     }
 
-    // 检查更新走主进程 IPC（主进程负责调 updateChecker 并弹通知）
+    // 检查更新走主进程 IPC；结果在主窗口右下角 toast 展示
     function btnCheckUpdateClick(){
         if(pageData.checkingUpdate) return
         pageData.checkingUpdate = true
-        mdui.snackbar({ message: '正在检查更新...' })
+        mdui.snackbar({ message: '正在检查更新' })
         try{
             require('electron').ipcRenderer.send("check-update")
         }catch(e){

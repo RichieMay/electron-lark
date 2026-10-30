@@ -110,14 +110,19 @@ function startDailyUpdateCheck(){
     scheduleNext();
 }
 
-// 参数代表是否手动触发
-function checkUpdate(showCheckNotify, successCb){
+// 参数: showCheckNotify 是否手动触发(弹系统通知); successCb 完成回调;
+//       resultCb 结果回调({type: newer/latest/fail, message}), 用于设置页内反馈(系统通知在部分环境会被静默)
+function checkUpdate(showCheckNotify, successCb, resultCb){
     if(successCb == undefined){
         successCb = function(){}
+    }
+    if(resultCb == undefined){
+        resultCb = function(){}
     }
 
     function notifyCheckFail(reason){
         console.log("检查更新失败: " + reason)
+        resultCb({type: 'fail', message: reason})
         if(showCheckNotify !== undefined && showCheckNotify) {
             new Notification({
                 title: "检查更新失败",
@@ -189,6 +194,7 @@ function checkUpdate(showCheckNotify, successCb){
             console.log("最新版本号:", newVersion);
 
             if(packageVersion != newVersion) {
+                resultCb({type: 'newer', message: "发现新版本 " + newVersion + "，可前往 GitHub Release 页下载"})
                 let updateNotify = new Notification({
                     title: "发现新版本",
                     subtitle: "发现新版本",
@@ -203,6 +209,7 @@ function checkUpdate(showCheckNotify, successCb){
                 updateNotify.show();
 
             } else {
+                resultCb({type: 'latest', message: "当前已是最新版本"})
                 if(showCheckNotify !== undefined && showCheckNotify) {
                     new Notification({
                         title: "当前已是最新版本",

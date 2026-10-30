@@ -111,6 +111,9 @@ function createWindow(configJson) {
     mainWindow = new BrowserWindow({
         width: LOGIN_WINDOW_SIZE.width,
         height: LOGIN_WINDOW_SIZE.height,
+        minWidth: 800,
+        minHeight: 600,
+        resizable: true,
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false

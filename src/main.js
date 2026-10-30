@@ -77,6 +77,11 @@ if (process.mas) app.setName('飞书Feishu');
 if (process.platform === 'win32') {
     app.setAppUserModelId('com.richiemay.electron-lark');
 }
+
+// userData 目录固定为 ElectronLark（与 NSIS 卸载脚本删除的目录一致）
+// 须在 app ready 之前执行
+app.setPath('userData', path.join(app.getPath('appData'), 'ElectronLark'));
+
 // fixup High CPU Usage issue
 // see https://github.com/electron/electron/issues/11908
 app.disableHardwareAcceleration();

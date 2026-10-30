@@ -98,7 +98,7 @@
                         <div class="mdui-list-item-content drawer-item">水印设置</div>
                     </li>
                     <li class="mdui-list-item mdui-ripple" onclick="showPage('host-set')">
-                        <div class="mdui-list-item-content drawer-item">服务器设置</div>
+                        <div class="mdui-list-item-content drawer-item">登录设置</div>
                     </li>
                     <li class="mdui-list-item mdui-ripple" onclick="showPage('proxy-set')">
                         <div class="mdui-list-item-content drawer-item">网络代理</div>
@@ -115,7 +115,7 @@
         <div class="container" style="padding-left: 180px">
             <div v-if="pageShow==='host-set'">
                 <div class="set-title-panel">
-                    <p class="doc-title">服务器设置</p>
+                    <p class="doc-title">登录设置</p>
                 </div>
                 <div class="set-content-panel">
                     <p>默认网页版飞书登录页，你可在下方设置自定义地址，保存后重启后生效。</p>
@@ -169,7 +169,7 @@
                     <p class="doc-title">网络代理</p>
                 </div>
                 <div class="set-content-panel">
-                    <p>设置应用程序的网络代理，，保存后重启后生效。</p>
+                    <p>设置应用程序的网络代理，保存后重启后生效。</p>
                     <p></p>
 
                     <label class="mdui-radio" style="display: block; margin: 14px 0;">
@@ -185,12 +185,12 @@
                     <label class="mdui-radio" style="display: block; margin: 14px 0;">
                         <input type="radio" name="proxy-mode" value="pac" v-model="proxyMode">
                         <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">自动配置（PAC 脚本）</span>
+                        <span style="margin-left: 6px">自动配置</span>
                     </label>
                     <label class="mdui-radio" style="display: block; margin: 14px 0;">
                         <input type="radio" name="proxy-mode" value="fixed" v-model="proxyMode">
                         <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">手动配置（代理服务器）</span>
+                        <span style="margin-left: 6px">手动配置</span>
                     </label>
 
                     <div v-if="pageShow==='proxy-set' && proxyMode==='direct'" style="margin-top: 25px;">
@@ -221,8 +221,7 @@
                     <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
                         onclick="btnOpenDevToolsClick()">启用开发者工具</button>
                     <br><br>
-                    <p>点击后在主窗口打开开发者工具，用于排查页面问题</p>
-                    <p>关闭请直接点击开发者工具面板上的关闭按钮</p>
+                    <p>点击打开开发者工具</p>
                 </div>
             </div>
 

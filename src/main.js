@@ -25,8 +25,8 @@ const APP_USER_AGENT = (() => {
 
 // 窗口尺寸跟随登录状态：登录页保持默认小尺寸，登录成功自动切换为大尺寸
 // 用户在登录期间调整的尺寸只在该次会话内自然保持，登出/重新登录后重置为默认
-const LOGIN_WINDOW_SIZE = { width: 1000, height: 770 };
-const APP_WINDOW_SIZE = { width: 1300, height: 850 };
+const LOGIN_WINDOW_SIZE = { width: 900, height: 800 };
+const APP_WINDOW_SIZE = { width: 1400, height: 850 };
 
 // 未登录时飞书会重定向到 accounts 子域或 /login 路径
 function isLoginUrl(url) {

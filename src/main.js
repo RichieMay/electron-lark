@@ -172,17 +172,23 @@ function createWindow(configJson) {
     // 关于图标的闪烁，方法是每1.5s做一个轮询，查看是否有未读消息提醒，如果有的话就闪烁
     // 侧边栏 class 为 larkc-badge-count circle navbarMenu-badge larkc-badge-normal
     webContents.on("did-finish-load", function() {
-        setInterval(() => {
-            if(mainWindow != null && !mainWindow.isVisible){
+        if(badgePollTimer != null) clearInterval(badgePollTimer)
+        badgePollTimer = setInterval(() => {
+            if(mainWindow == null || mainWindow.isDestroyed()){
                 return
             }
             webContents.executeJavaScript(`document.getElementsByClassName('larkc-badge-count circle larkc-badge-normal').length`)
                 .then(function(result){
-                    if(parseInt(result) > 0) {
+                    const unread = parseInt(result) || 0
+                    if(unread > 0) {
                         startBlingIcon();
                     } else {
                         stopBlingIcon();
                     }
+                    // 未读数增加时兜底弹通知（页面 hook 可能被新版飞书绕过）
+                    maybeNotifyNewMessage(unread)
+                }).catch(function(e){
+                    // 页面导航/销毁瞬间的轮询失败可忽略
                 })
             if(!showWarterMark) {
                 webContents.executeJavaScript(`if(document.getElementsByClassName('lark-water-mark-main').length > 0) document.getElementsByClassName('lark-water-mark-main')[0].remove()`)
@@ -190,25 +196,27 @@ function createWindow(configJson) {
         }, 1500);
         
         // 注入 js，hack html5 的 Notification 接口，并将通知内容转发到 main.js 里
+        // 同时拦截 ServiceWorkerRegistration.showNotification：新版飞书可能不再
+        // 直接调用 new Notification()，而是通过 Service Worker 发通知
         webContents.executeJavaScript(`
             let ipcRenderer = null;
             try{ipcRenderer = require('electron').ipcRenderer} catch(e) {}
+            let sendNotify = function(title, opt){
+                if(ipcRenderer == null) return false;
+                let sendMsg = JSON.stringify({ title: title, opt: opt })
+                try {
+                    ipcRenderer.send("notification", sendMsg);
+                    return true;
+                } catch (e) {
+                    console.log("发送 ipc 消息报错", e);
+                    return false;
+                }
+            }
             let oldNotification = window.Notification;
             let newNotification = function(title, opt){
                 console.log("hack-title:" + title);
                 console.log("hack-opt:" + JSON.stringify(opt));
-                if(ipcRenderer != null) {
-                    let sendMsg = JSON.stringify({
-                        title: title,
-                        opt: opt
-                    })
-                    try {
-                        ipcRenderer.send("notification", sendMsg);
-                    } catch (e) {
-                        console.log("发送 ipc 消息报错", e);
-                        return new oldNotification(title,opt);
-                    }
-                } else {
+                if(!sendNotify(title, opt)) {
                     return new oldNotification(title,opt);
                 }
             }
@@ -218,7 +226,18 @@ function createWindow(configJson) {
                     return oldNotification.permission;
                 }
             });
-            window.Notification = newNotification;`);
+            window.Notification = newNotification;
+            if(window.ServiceWorkerRegistration && ServiceWorkerRegistration.prototype) {
+                let oldShow = ServiceWorkerRegistration.prototype.showNotification;
+                if(typeof oldShow === 'function') {
+                    ServiceWorkerRegistration.prototype.showNotification = function(title, opt){
+                        console.log("hack-sw-title:" + title);
+                        console.log("hack-sw-opt:" + JSON.stringify(opt));
+                        sendNotify(title, opt);
+                        return oldShow.call(this, title, opt);
+                    };
+                }
+            }`);
 
             // 在页面加载完成之后，检查新版本信息
             updateChecker.checkInAppStart();
@@ -278,6 +297,15 @@ function createWindow(configJson) {
 let blingCount = 0;
 let blingTimer = null;
 let bling = false;
+
+// 新消息兜底提醒：未读角标增加时由主进程直接弹系统通知。
+// 页面 Notification hook 依赖飞书前端调用 new Notification()，新版飞书可能
+// 改用其他通知方式（如 Service Worker）而绕过 hook；角标轮询与托盘闪烁共用
+// 同一信号源，无论飞书怎么发通知，未读角标都会增加，因此必定能触发
+let badgePollTimer = null;
+let lastUnreadBadgeCount = 0;
+let badgeBaselineReady = false;
+let lastHookNotifyTime = 0;
 function startBlingIcon() {
     // 部分修复ubuntu18.04 下面锁屏之后 dock 图标一直不显示的问题
     // 每次 start bling 之前重新设置一遍
@@ -315,6 +343,28 @@ function stopBlingIcon() {
         newAppTray.setImage(dock32Icon)
         bling = false;
     }
+}
+
+/**
+ * 新消息兜底通知。
+ * 首轮轮询只建立基线不弹通知（否则启动时已有未读会立即轰炸）；
+ * 页面 hook 通知刚触发过（60s 内）时跳过，避免与 hook 通知重复弹两条；
+ * 用户正聚焦在飞书窗口时不弹（与托盘闪烁的判断一致）
+ */
+function maybeNotifyNewMessage(currentUnread) {
+    if(!badgeBaselineReady) {
+        badgeBaselineReady = true
+        lastUnreadBadgeCount = currentUnread
+        return
+    }
+    if(currentUnread > lastUnreadBadgeCount) {
+        const now = Date.now()
+        const watching = onFocus && mainWindow != null && !mainWindow.isDestroyed() && mainWindow.isVisible()
+        if(!watching && now - lastHookNotifyTime > 60 * 1000) {
+            showLarkNotify("飞书新消息", { body: "收到新消息，点击查看", channelId: null })
+        }
+    }
+    lastUnreadBadgeCount = currentUnread
 }
 
 
@@ -492,30 +542,47 @@ function getConfigJson(callback){
 /**
  * 打开设置窗口
  * page 参数为设置页内的页签（如 about-info 直接打开"关于"页），可选
+ * 单例：已打开则仅置顶聚焦，并按需跳转页签，不再重复开窗
  */
+let settingsWindow = null;
 function openSettingsWindows(page){
-    let settingsWindow = null;
-    if(settingsWindow == null) {
-        settingsWindow = new BrowserWindow({
-            width: 700,
-            height: 650,
-            frame: false,
-            // height: 200,
-            resizable: false,
-            webPreferences: {
-                nodeIntegration: true,
-                contextIsolation: false
-            },
-        });
-
-        // console.log(settingsWindow)
-        // settingsWindow.loadUrl('file://' + __dirname + '/app/settings.html');
-        settingsWindow.setMenuBarVisibility(false);
-        // 通过 hash 指定初始页签（如 #about-info 直接打开"关于"页）
-        let hash = (page != null && page !== '') ? ('#' + page) : ''
-        settingsWindow.loadURL('file://' +__dirname+ '/windows/views/settings.html' + hash);
-        // settingsWindow.toggleDevTools();
+    if(settingsWindow != null && !settingsWindow.isDestroyed()) {
+        settingsWindow.show();
+        settingsWindow.focus();
+        // 页签请求（如 about-info）：调用页面内 showPage 切换（Vue 响应式），
+        // 同步 hash 保持一致；无请求则保持当前页签不动
+        if(page != null && page !== '') {
+            settingsWindow.webContents.executeJavaScript(
+                `if(location.hash !== '#${page}'){ location.hash = '#${page}'; }` +
+                `if(typeof showPage === 'function'){ showPage(${JSON.stringify(page)}); }`
+            ).catch(function(){/* 窗口销毁竞态可忽略 */})
+        }
+        return
     }
+    settingsWindow = new BrowserWindow({
+        width: 700,
+        height: 650,
+        frame: false,
+        // height: 200,
+        resizable: false,
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false
+        },
+    });
+
+    // console.log(settingsWindow)
+    // settingsWindow.loadUrl('file://' + __dirname + '/app/settings.html');
+    settingsWindow.setMenuBarVisibility(false);
+    // 通过 hash 指定初始页签（如 #about-info 直接打开"关于"页）
+    let hash = (page != null && page !== '') ? ('#' + page) : ''
+    settingsWindow.loadURL('file://' +__dirname+ '/windows/views/settings.html' + hash);
+    // settingsWindow.toggleDevTools();
+
+    // 窗口关闭后清空引用，下次可重新打开
+    settingsWindow.on('closed', function () {
+        settingsWindow = null
+    })
 }
 
 // ------------------------ App ------------------------------------
@@ -570,6 +637,8 @@ ipcMain.on("notification", (event, msg) => {
     // let opt = args.opt;
     // console.log(args.title, args.opt);
     // title 是对话框名称，opt 是聊天的具体内容，想看格式的话可以去掉上面那行注释
+    // 记录 hook 通知时间，兜底角标通知据此去重
+    lastHookNotifyTime = Date.now()
     showLarkNotify(args.title, args.opt, args.opt.channelId)
     event.returnValue = 'pong'
 })

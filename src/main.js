@@ -1,18 +1,39 @@
 'use strict';
 
+// ============================================================================
+// electron-lark 主进程（单文件分层，自上而下依赖单向）
+//
+//   1. 常量           —— 不变的配置项
+//   2. 运行时状态      —— 全部可变状态集中声明，禁止散落
+//   3. 配置读写        —— config.json 落 userData（全应用唯一读写入口）
+//   4. 通用工具        —— 登录页判断、窗口尺寸应用等基础函数
+//   5. 会话初始化      —— UA / 权限 / 代理 / 下载（创建窗口前调用）
+//   6. 主窗口          —— 创建、登录态尺寸切换、新窗口外链分发、图片独立查看窗口
+//   7. 未读角标轮询    —— 角标 → 托盘闪烁 + 兜底通知
+//   8. 页面 hook       —— 通知拦截（Notification/SW）+ 图片点击改独立窗口
+//   9. 系统通知        —— 主进程弹通知 + 页面 toast
+//  10. 托盘            —— 图标、菜单、闪烁
+//  11. 设置窗口        —— 单例
+//  12. IPC             —— 全部频道收口在这里
+//  13. App 生命周期    —— 入口编排，只做装配，不写具体逻辑
+// ============================================================================
+
 const appConf = require("./configuration")
+const updateChecker = require('./updateChecker')
 
 const electron = require('electron')
 const fs = require('fs')
 const path = require('path')
-const updateChecker = require('./updateChecker')
 
-const shell = electron.shell;
 const app = electron.app;
-const ipcMain = electron.ipcMain;
-const BrowserWindow = electron.BrowserWindow;
-const Notification = electron.Notification;
+const shell = electron.shell;
 const Menu = electron.Menu;
+const ipcMain = electron.ipcMain;
+const Notification = electron.Notification;
+const BrowserWindow = electron.BrowserWindow;
+const globalShortcut = electron.globalShortcut;
+
+// ============================ 1. 常量 ============================
 
 // 用当前 Chromium 真实版本号生成 UA，只隐藏 Electron 痕迹
 // 硬编码旧版 Chrome UA 会导致飞书文件预览判定浏览器过旧，提示"不支持查看"
@@ -27,6 +48,104 @@ const APP_USER_AGENT = (() => {
 // 用户在登录期间调整的尺寸只在该次会话内自然保持，登出/重新登录后重置为默认
 const LOGIN_WINDOW_SIZE = { width: 900, height: 800 };
 const APP_WINDOW_SIZE = { width: 1450, height: 800 };
+
+const DEFAULT_START_PAGE = 'https://feishu.cn/messenger/';
+
+// Windows 通知 AUMID：须与 NSIS 快捷方式写入的 appId 一致，
+// 否则设置里的通知开关管不到本进程发出的 toast
+const APP_AUMID = 'com.richiemay.electron-lark';
+
+// ============================ 2. 运行时状态 ============================
+
+// 全部可变状态集中在此；各分区函数只读写这里，互相不持有私有引用
+const S = {
+    mainWindow: null,
+    mainWebContents: null,   // 主窗口 webContents 快捷引用（可为 null）
+    settingsWindow: null,    // 设置窗口（单例）
+    imageWindows: new Set(), // 聊天图片独立查看窗口（防 GC 持有，关窗自动移除）
+    tray: null,
+    onFocus: false,          // 是否有应用窗口处于焦点
+    isQuitting: false,       // 真正退出中（此时不再拦截主窗口 close）
+
+    // 未读角标轮询状态
+    badgePollTimer: null,
+    lastUnreadBadgeCount: 0,
+    badgeBaselineReady: false,
+
+    // 托盘闪烁状态
+    blingTimer: null,
+    blingCount: 0,
+    bling: false,
+
+    lastHookNotifyTime: 0,   // 页面 hook 通知最近触发时间（兜底通知去重用）
+
+    activeNotifications: new Set(), // 存活中的系统通知（防 GC 导致 toast 丢失/事件失效）
+};
+
+const dock32Icon = electron.nativeImage.createFromPath(appConf.dock32)
+const dock32EmptyIcon = electron.nativeImage.createFromPath(appConf.dock32Empty)
+
+// 主窗口是否存活（所有访问 mainWindow 的地方先过这个门）
+function mainAlive() {
+    return S.mainWindow != null && !S.mainWindow.isDestroyed()
+}
+
+// ============================ 3. 配置读写 ============================
+
+// 关键修复：旧实现用相对路径 'config.json' 读写，实际解析到 process.cwd()。
+// 打包安装后 cwd 是安装目录（Program Files，不可写），设置保存静默失败。
+// 现在一律落在 userData（可写、随用户数据管理、卸载脚本可清理）。
+function configPath() {
+    return path.join(app.getPath('userData'), 'config.json')
+}
+
+// 默认配置：读取时与文件内容合并，保证新增字段有默认值、缺字段不 undefined
+function defaultConfig() {
+    return {
+        startPageLink: null,   // 启动页地址，空则用默认飞书
+        larkOpenLink: null,    // 需在应用内打开的链接（每行一个）
+        showWarterMark: false, // 是否显示飞书页面水印
+        proxyMode: 'system',   // 代理模式: system/pac/fixed/direct
+        proxyPacUrl: null,     // PAC 脚本地址
+        proxyServer: null,     // 固定代理服务器地址
+    }
+}
+
+function loadConfig() {
+    try {
+        return Object.assign(defaultConfig(), JSON.parse(fs.readFileSync(configPath(), 'utf-8')))
+    } catch (e) {
+        // 首次启动无配置文件属正常；损坏则回写默认值重建
+        saveConfig(defaultConfig())
+        return defaultConfig()
+    }
+}
+
+function saveConfig(config) {
+    try {
+        fs.writeFileSync(configPath(), JSON.stringify(config, null, "  "))
+        console.log("配置已保存: " + configPath())
+        return true
+    } catch (e) {
+        console.error("配置保存失败:", e.message)
+        return false
+    }
+}
+
+// 一次性迁移：把旧版本遗留在工作目录的 config.json 带入 userData
+function migrateLegacyConfig() {
+    const legacy = path.join(process.cwd(), 'config.json')
+    try {
+        if (fs.existsSync(legacy) && !fs.existsSync(configPath())) {
+            fs.copyFileSync(legacy, configPath())
+            console.log("已迁移旧配置到 userData")
+        }
+    } catch (e) {
+        console.log("旧配置迁移跳过:", e.message)
+    }
+}
+
+// ============================ 4. 通用工具 ============================
 
 // 未登录时飞书会重定向到 accounts 子域或 /login 路径
 function isLoginUrl(url) {
@@ -55,326 +174,15 @@ function applyWindowSize(win, size) {
     });
 }
 
-// electron-context-menu 4.x 起为纯 ESM 包，主进程(CommonJS)需用动态 import() 加载
-import('electron-context-menu').then(contextMenu => {
-    contextMenu.default({
-        showInspectElement: false,
-        showCopyImage: true,
-        showCopyImageAddress: true,
-        showSaveImageAs: true,
-        labels: {
-            copy: '复制',
-            copyImage: '复制图片',
-            copyImageAddress: '复制图片地址',
-            saveImageAs: '图片另存为',
-        },
-    });
-}).catch(err => console.error("electron-context-menu 加载失败:", err));
-
-if (process.mas) app.setName('飞书Feishu');
-// Windows 通知依赖 AUMID，需与 electron-builder NSIS 快捷方式写入的 appId 一致，
-// 否则打包后 Notification 全部静默不弹（消息提醒/更新提示/下载完成都会受影响）
-if (process.platform === 'win32') {
-    app.setAppUserModelId('com.richiemay.electron-lark');
-}
-
-// userData 目录固定为 ElectronLark（与 NSIS 卸载脚本删除的目录一致）
-// 须在 app ready 之前执行
-app.setPath('userData', path.join(app.getPath('appData'), 'ElectronLark'));
-
-// fixup High CPU Usage issue
-// see https://github.com/electron/electron/issues/11908
-app.disableHardwareAcceleration();
-
-// 是否处于焦点，检点监听
-let onFocus = false;
-app.on('browser-window-blur', function () {
-    onFocus = false;
-})
-app.on('browser-window-focus', function () {
-    onFocus = true;
-})
-
-let newAppTray = null;
-const dock32Icon = electron.nativeImage.createFromPath(appConf.dock32)
-const dock32EmptyIcon = electron.nativeImage.createFromPath(appConf.dock32Empty)
-
-// // 菜单 Template 
-// const appMenu = require("./windows/app_menu")
-
-const globalShortcut = electron.globalShortcut;
-
-let mainWindow
-let webContents
-
-function createWindow(configJson) {
-    mainWindow = new BrowserWindow({
-        width: LOGIN_WINDOW_SIZE.width,
-        height: LOGIN_WINDOW_SIZE.height,
-        minWidth: 800,
-        minHeight: 600,
-        resizable: true,
-        webPreferences: {
-            nodeIntegration: true,
-            contextIsolation: false
-        },
-        icon: appConf.icon128
-    })
-
-    // 登录状态驱动的窗口尺寸切换：
-    // 进入登录页 → 小尺寸；离开登录页(登录成功) → 大尺寸。
-    // 用户调整过的尺寸只在登录后的会话内自然保持，重新登录时重置为默认
-    let windowSizeStage = 'login';
-    mainWindow.webContents.on('did-navigate', (event, url) => {
-        if (isLoginUrl(url)) {
-            if (windowSizeStage !== 'login') {
-                windowSizeStage = 'login';
-                applyWindowSize(mainWindow, LOGIN_WINDOW_SIZE);
-            }
-        } else {
-            if (windowSizeStage !== 'app') {
-                windowSizeStage = 'app';
-                applyWindowSize(mainWindow, APP_WINDOW_SIZE);
-            }
-        }
-    });
-
-    // mainWindow.loadFile('index.html')
-    // 改为使用loadURL加载飞书地址
-    let loadUrl = "https://feishu.cn/messenger/";
-    if (configJson.startPageLink !== undefined
-        && configJson.startPageLink != null
-        && configJson.startPageLink.trim() != "") {
-        loadUrl = configJson.startPageLink
-    }
-    console.log("load main page: " + loadUrl)
-    mainWindow.loadURL(loadUrl, {
-        userAgent: APP_USER_AGENT
-    })
-    webContents = mainWindow.webContents
-    mainWindow.on('closed', function () {
-        mainWindow = null
-    })
-
-    mainWindow.on('close', (event) => {
-        mainWindow.hide();
-        mainWindow.setSkipTaskbar(true);
-        event.preventDefault();
-    });
-
-    let showWarterMark = false;
-    if(configJson.showWarterMark !== undefined
-        && configJson.showWarterMark != null) {
-        showWarterMark = configJson.showWarterMark;
-    }
-
-    // 窗口加载完成后运行
-    // 关于图标的闪烁，方法是每1.5s做一个轮询，查看是否有未读消息提醒，如果有的话就闪烁
-    // 侧边栏 class 为 larkc-badge-count circle navbarMenu-badge larkc-badge-normal
-    webContents.on("did-finish-load", function() {
-        setInterval(() => {
-            if(mainWindow != null && !mainWindow.isVisible){
-                return
-            }
-            webContents.executeJavaScript(`document.getElementsByClassName('larkc-badge-count circle larkc-badge-normal').length`)
-                .then(function(result){
-                    if(parseInt(result) > 0) {
-                        startBlingIcon();
-                    } else {
-                        stopBlingIcon();
-                    }
-                })
-            if(!showWarterMark) {
-                webContents.executeJavaScript(`if(document.getElementsByClassName('lark-water-mark-main').length > 0) document.getElementsByClassName('lark-water-mark-main')[0].remove()`)
-            }
-        }, 1500);
-        
-        // 注入 js，hack html5 的 Notification 接口，并将通知内容转发到 main.js 里
-        webContents.executeJavaScript(`
-            let ipcRenderer = null;
-            try{ipcRenderer = require('electron').ipcRenderer} catch(e) {}
-            let oldNotification = window.Notification;
-            let newNotification = function(title, opt){
-                console.log("hack-title:" + title);
-                console.log("hack-opt:" + JSON.stringify(opt));
-                if(ipcRenderer != null) {
-                    let sendMsg = JSON.stringify({
-                        title: title,
-                        opt: opt
-                    })
-                    try {
-                        ipcRenderer.send("notification", sendMsg);
-                    } catch (e) {
-                        console.log("发送 ipc 消息报错", e);
-                        return new oldNotification(title,opt);
-                    }
-                } else {
-                    return new oldNotification(title,opt);
-                }
-            }
-            newNotification.requestPermission = oldNotification.requestPermission.bind(oldNotification);
-            Object.defineProperty(newNotification, 'permission', {
-                get: () => {
-                    return oldNotification.permission;
-                }
-            });
-            window.Notification = newNotification;`);
-
-            // 在页面加载完成之后，检查新版本信息
-            updateChecker.checkInAppStart();
-            // 每天 16:00 定时再静默检查一次
-            updateChecker.startDailyCheck();
-    })
-
-    // 定义在 electron 内部打开的 url，除此之外的 url 都跳转浏览器打开，使用 indexOf >= 0 来判断
-    // 飞书域名默认留在应用内打开：文件/预览链接若转交系统浏览器会丢失登录态，报 session key not found
-    let electronUrl = [
-        "feishu.cn",
-        "larksuite.com",
-    ]
-    if (configJson.larkOpenLink !== undefined && configJson.larkOpenLink !== null
-        && ("" + configJson.larkOpenLink).trim() !== ""){
-        electronUrl = electronUrl.concat(("" + configJson.larkOpenLink).split("\n"))
-    }
-
-    // 拦截新窗口打开，决定在应用内打开还是跳转系统浏览器
-    // （Electron 22 起移除了 new-window 事件，改用 setWindowOpenHandler）
-    // feishu.cn/calendar/ 日历
-    // feishu.cn/space/home/ 文档
-    webContents.setWindowOpenHandler(({ url }) => {
-        console.log("open url " + url)
-
-        let openInElectron = false
-        for(let i=0;i<electronUrl.length; i++){
-            if(electronUrl[i].trim() != "" && url.indexOf(electronUrl[i]) >= 0) {
-                openInElectron = true;
-                console.log("open url electron")
-                break;
-            }
-        }
-
-        if(!openInElectron && url.startsWith("http")) {
-            // 其余链接交给系统默认浏览器打开
-            shell.openExternal(url)
-        }
-        return {
-            action: openInElectron ? 'allow' : 'deny',
-            overrideBrowserWindowOptions: {
-                width: 1200,
-                height: 600,
-                show: false,
-            }
-        }
-    })
-
-    // 应用内新窗口（如文件预览页）加载完成后再显示，并统一设置 UA
-    webContents.on("did-create-window", (childWindow) => {
-        // 将所有打开的新页面的 user agent 也重新设置，避免提示浏览器错误
-        childWindow.webContents.setUserAgent(APP_USER_AGENT)
-        childWindow.once('ready-to-show', () => childWindow.show())
-    })
-}
-
-let blingCount = 0;
-let blingTimer = null;
-let bling = false;
-function startBlingIcon() {
-    // 部分修复ubuntu18.04 下面锁屏之后 dock 图标一直不显示的问题
-    // 每次 start bling 之前重新设置一遍
-    // 保证哪怕因为锁屏而 dock 图标消失之后，收到新消息也可以闪烁
-    // appTray.appTray.destroy()
-    // appTray.init(electron, app, mainWindow)
-
-    // 如果是焦点的话，就不闪烁
-    if (onFocus && mainWindow.isVisible()) {
-        stopBlingIcon()
-        return
-    }
-    if (blingTimer != null) {
-        return
-    }
-    bling = true;
-    blingTimer = setInterval(function () {
-        blingCount++;
-        if (blingCount % 2 == 0) {
-            newAppTray.setImage(dock32EmptyIcon)
-        } else {
-            newAppTray.setImage(dock32Icon)
-        }
-        // 避免 count 无限增大
-        if(blingCount == 1000) blingCount = 0
-    }, 500);
-}
-
-function stopBlingIcon() {
-    if(bling) {
-        if (blingTimer != null) {
-            clearInterval(blingTimer)
-            blingTimer = null;
-        }
-        newAppTray.setImage(dock32Icon)
-        bling = false;
-    }
-}
-
-
-// 修复 Application Menu上图标不显示
-if (process.env.XDG_CURRENT_DESKTOP == 'ubuntu:GNOME') {
-    process.env.XDG_CURRENT_DESKTOP = 'Unity';
-}
-
-const trayMenuTemplate = [
-    {
-        label: '显示主界面',
-        click: function(){
-            if(mainWindow != null){
-                mainWindow.show()
-            }
-        }
-    },
-    {
-        label: '系统设置',
-        click: function(){
-            openSettingsWindows();
-        }
-    },
-    {
-        type: 'separator'
-    },
-    {
-        label: '退出程序',
-        click: function(){
-            console.log("从 tray 退出")
-            app.quit();
-            mainWindow.destroy()
-        }
-    }
-];
-const contextMenu = electron.Menu.buildFromTemplate(trayMenuTemplate)
-
-function appTrayInit(){
-    newAppTray = new electron.Tray(dock32Icon);
-    newAppTray.setToolTip('Feishu');
-    newAppTray.setContextMenu(contextMenu);
-    newAppTray.on('click',function () {
-        stopBlingIcon();
-        mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show()
-        mainWindow.isVisible() ? mainWindow.setSkipTaskbar(false) : mainWindow.setSkipTaskbar(true);
-    })
-    newAppTray.on('double-click', function() {
-        if(mainWindow != null && !mainWindow.isVisible()){
-            mainWindow.show()
-        }
-    })
-}
+// ============================ 5. 会话初始化 ============================
 
 /**
- * 应用内文件下载处理
- * 飞书页面触发的下载自动保存到系统"下载"目录（同名文件自动加序号，不覆盖），
- * 下载完成后系统通知，点击通知打开文件所在文件夹
+ * 初始化默认会话：UA / 通知权限 / 代理 / 下载。
+ * 必须在创建主窗口之前调用，保证首个页面加载即按配置走
  */
-function initDownload(){
+function initSession(config) {
     const ses = electron.session.defaultSession
+
     // 下载请求由 session 发起，需与页面一致使用新 UA，避免飞书服务端校验失败
     ses.setUserAgent(APP_USER_AGENT)
 
@@ -385,6 +193,54 @@ function initDownload(){
         callback(permission === 'notifications' || permission === 'fullscreen')
     })
 
+    initProxy(ses, config)
+    initDownload(ses)
+}
+
+/**
+ * 按用户配置应用网络代理（config 的 proxyMode/proxyPacUrl/proxyServer）
+ *   system: 跟随系统代理（默认，不设置即为此行为）
+ *   pac:    使用 PAC 自动配置脚本
+ *   fixed:  固定代理服务器（http/https/socks4/socks5）
+ *   direct: 所有连接直连
+ */
+function initProxy(ses, config) {
+    if (config.proxyMode === 'pac') {
+        const pacUrl = (config.proxyPacUrl || "").trim()
+        if (pacUrl !== "") {
+            console.log("使用 PAC 代理: " + pacUrl)
+            ses.setProxy({ pacUrl: pacUrl })
+            return
+        }
+        console.log("PAC 模式但未配置脚本地址，回退系统代理")
+    }
+
+    if (config.proxyMode === 'fixed') {
+        const server = (config.proxyServer || "").trim()
+        if (server !== "") {
+            console.log("使用固定代理: " + server)
+            ses.setProxy({ proxyRules: server })
+            return
+        }
+        console.log("fixed 模式但未配置服务器地址，回退系统代理")
+    }
+
+    if (config.proxyMode === 'direct') {
+        console.log("所有连接直连")
+        ses.setProxy({ mode: 'direct' })
+        return
+    }
+
+    // system 或无效配置：跟随系统代理
+    ses.setProxy({ mode: 'system' })
+}
+
+/**
+ * 应用内文件下载处理：
+ * 飞书页面触发的下载自动保存到系统"下载"目录（同名文件自动加序号，不覆盖），
+ * 下载完成后系统通知，点击通知打开文件所在文件夹
+ */
+function initDownload(ses) {
     ses.on('will-download', (event, item) => {
         const downloadDir = app.getPath('downloads')
         const filename = item.getFilename() || 'download'
@@ -404,202 +260,429 @@ function initDownload(){
         console.log("download save path: " + savePath)
 
         item.once('done', (e, state) => {
-            if(!Notification.isSupported()) return
-            if(state === 'completed') {
-                let notify = new Notification({
+            if (state === 'completed') {
+                showSystemNotify({
                     title: "下载完成",
-                    subtitle: "下载完成",
                     body: filename,
-                    icon: electron.nativeImage.createFromPath(appConf.dock32),
-                });
-                notify.addListener('click', function(){
-                    electron.shell.showItemInFolder(savePath)
-                });
-                notify.show();
+                    onClick: function () { shell.showItemInFolder(savePath) },
+                })
             } else {
-                new Notification({
+                showSystemNotify({
                     title: "下载失败",
-                    subtitle: "下载失败",
                     body: filename + " (" + state + ")",
-                    icon: electron.nativeImage.createFromPath(appConf.dock32Empty),
-                }).show();
+                })
             }
         })
     })
 }
 
+// ============================ 6. 主窗口（主窗口 + 图片查看窗口） ============================
+
+function createMainWindow(config) {
+    const win = new BrowserWindow({
+        width: LOGIN_WINDOW_SIZE.width,
+        height: LOGIN_WINDOW_SIZE.height,
+        minWidth: 800,
+        minHeight: 600,
+        resizable: true,
+        webPreferences: {
+            // 飞书页面需要 require('electron').ipcRenderer 供通知 hook 使用，
+            // 暂维持 nodeIntegration（后续如需收紧安全，引入 preload +
+            // contextBridge 暴露最小 API 即可，页面侧只需改 sendNotify 一处）
+            nodeIntegration: true,
+            contextIsolation: false,
+            // 隐藏到托盘后禁止后台节流：新版 Chromium 会冻结/降频隐藏页面的
+            // 定时器与消息回调，导致角标不更新（托盘不闪）、消息在窗口
+            // 重新显示后才被处理。作为常驻 IM 必须保持后台全速运行
+            backgroundThrottling: false,
+        },
+        icon: appConf.icon128
+    })
+    S.mainWindow = win
+    S.mainWebContents = win.webContents
+
+    // 登录状态驱动的窗口尺寸切换：
+    // 进入登录页 → 小尺寸；离开登录页(登录成功) → 大尺寸。
+    // 用户调整过的尺寸只在登录后的会话内自然保持，重新登录时重置为默认
+    let windowSizeStage = 'login';
+    win.webContents.on('did-navigate', (event, url) => {
+        if (isLoginUrl(url)) {
+            if (windowSizeStage !== 'login') {
+                windowSizeStage = 'login';
+                applyWindowSize(win, LOGIN_WINDOW_SIZE);
+            }
+        } else {
+            if (windowSizeStage !== 'app') {
+                windowSizeStage = 'app';
+                applyWindowSize(win, APP_WINDOW_SIZE);
+            }
+        }
+    });
+
+    // 默认加载网页版飞书，可由配置的 startPageLink 覆盖
+    let loadUrl = DEFAULT_START_PAGE;
+    if (config.startPageLink != null && ("" + config.startPageLink).trim() !== "") {
+        loadUrl = config.startPageLink
+    }
+    console.log("load main page: " + loadUrl)
+    win.loadURL(loadUrl, { userAgent: APP_USER_AGENT })
+
+    win.on('closed', function () {
+        if (S.mainWindow === win) {
+            S.mainWindow = null
+            S.mainWebContents = null
+        }
+    })
+
+    // 点 X 隐藏到托盘而非退出；真正退出（托盘退出/关机）放行
+    win.on('close', (event) => {
+        if (S.isQuitting) return
+        win.hide()
+        win.setSkipTaskbar(true)
+        event.preventDefault()
+    })
+
+    const webContents = win.webContents
+
+    // 开发者工具开/关时（含用户直接 X 掉 DevTools 窗口）推送状态给设置页，
+    // 设置页开关随之联动，不再只在切页签时拉取一次
+    webContents.on('devtools-open-state', (event, isOpen) => {
+        console.log("devtools open state: " + isOpen)
+        if (S.settingsWindow != null && !S.settingsWindow.isDestroyed()) {
+            S.settingsWindow.webContents.send('devtools-state-changed', isOpen)
+        }
+    })
+
+    // 每次页面加载完成后（重）启动轮询、注入页面 hook（通知 + 图片点击拦截）
+    webContents.on('did-finish-load', function () {
+        startBadgePoll(!!config.showWarterMark)
+        injectNotificationHook()
+        // 检查新版本：启动静默检查一次，之后每天 16:00 再定时检查
+        updateChecker.checkInAppStart();
+        updateChecker.startDailyCheck();
+    })
+
+    // 飞书域名默认留在应用内打开：文件/预览链接若转交系统浏览器会丢失登录态，
+    // 报 session key not found；其余链接交给系统默认浏览器
+    let electronUrl = ['feishu.cn', 'larksuite.com']
+    if (config.larkOpenLink != null && ("" + config.larkOpenLink).trim() !== "") {
+        electronUrl = electronUrl.concat(("" + config.larkOpenLink).split("\n"))
+    }
+
+    // Electron 22 起移除了 new-window 事件，改用 setWindowOpenHandler
+    webContents.setWindowOpenHandler(({ url }) => {
+        console.log("open url " + url)
+
+        const openInElectron = electronUrl.some(
+            item => item.trim() !== "" && url.indexOf(item) >= 0)
+        if (openInElectron) {
+            console.log("open url electron")
+        } else if (url.startsWith("http")) {
+            shell.openExternal(url)
+        }
+
+        return {
+            action: openInElectron ? 'allow' : 'deny',
+            overrideBrowserWindowOptions: {
+                width: 1200,
+                height: 600,
+                show: false,
+            },
+        }
+    })
+
+    // 应用内新窗口（如文件预览页）加载完成后再显示，并统一设置 UA
+    webContents.on('did-create-window', (childWindow) => {
+        childWindow.webContents.setUserAgent(APP_USER_AGENT)
+        childWindow.once('ready-to-show', () => childWindow.show())
+    })
+
+    return win
+}
+
 /**
- * 按用户配置应用网络代理（config.json 的 proxyMode/proxyPacUrl/proxyServer）
- * 作用于整个默认会话：飞书页面加载、文件下载、更新检查(electron.net)全部生效
- *   system: 跟随系统代理（默认，不设置即为此行为）
- *   pac:    使用 PAC 自动配置脚本
- *   fixed:  固定代理服务器（http/https/socks4/socks5）
- *   direct: 所有连接直连
+ * 聊天图片独立查看窗口：
+ * 飞书图片查看器是页面内全屏遮罩（占用整个应用窗口且不可缩放），
+ * 这里改为弹出独立小窗加载图片本体，支持拖拽缩放窗口、Ctrl+滚轮缩放。
+ * 同 session（默认会话）加载，大图鉴权 cookie 自动携带
  */
-function initProxy(configJson){
-    const ses = electron.session.defaultSession
-    const mode = configJson.proxyMode
+function openImageWindow(src) {
+    if (typeof src !== 'string' || src === '') return
+    const isDataUrl = src.startsWith('data:')
+    if (!isDataUrl && !/^https?:/i.test(src)) return
 
-    if(mode === 'pac'){
-        const pacUrl = (configJson.proxyPacUrl || "").trim()
-        if(pacUrl !== ""){
-            console.log("使用 PAC 代理: " + pacUrl)
-            ses.setProxy({ pacUrl: pacUrl })
-            return
+    const win = new BrowserWindow({
+        width: 900,
+        height: 700,
+        minWidth: 200,
+        minHeight: 150,
+        autoHideMenuBar: true,
+        // 图片直链在页面外打开会丢失 referer 导致部分大图 403，
+        // 挂到默认会话（与主窗口同 session）携带登录态
+        webPreferences: {
+            session: electron.session.defaultSession,
+        },
+    })
+    S.imageWindows.add(win)
+    win.on('closed', function () { S.imageWindows.delete(win) })
+
+    win.loadURL(src, { httpReferrer: DEFAULT_START_PAGE })
+        .then(function () {
+            // 图片在窗口里默认左上角对齐，注入样式铺满+留白更舒适
+            return win.webContents.insertCSS(
+                'html,body{margin:0;height:100%;background:#1e1e1e;display:flex;'
+                + 'align-items:center;justify-content:center;overflow:hidden;}'
+                + 'img{max-width:100%;max-height:100%;object-fit:contain;}')
+        })
+        .catch(function (e) {
+            console.log("图片窗口加载失败: " + e.message)
+            win.close()
+        })
+    return win
+}
+
+// ============================ 7. 未读角标轮询 ============================
+
+/**
+ * 启动未读角标轮询（每 1.5s）：
+ * - 有未读 → 托盘图标闪烁；无未读 → 停止闪烁
+ * - 未读数增加 → 兜底弹系统通知（页面 hook 可能被新版飞书绕过）
+ * - 未开启水印时顺带移除飞书页面水印
+ * 页面重载会再次触发 did-finish-load，先清旧定时器避免叠加
+ */
+function startBadgePoll(showWarterMark) {
+    if (S.badgePollTimer != null) clearInterval(S.badgePollTimer)
+    S.badgePollTimer = setInterval(() => {
+        if (!mainAlive()) return
+        const webContents = S.mainWebContents
+
+        // 未读角标检测，三重策略（旧版 class → 标题未读数 → 通用 badge 元素），
+        // 飞书前端改版只换 class 名时不至于全部失配导致托盘永不闪烁
+        webContents.executeJavaScript(`
+            (function(){
+                // 1. 旧版角标 class
+                var legacy = document.getElementsByClassName('larkc-badge-count circle larkc-badge-normal').length;
+                if(legacy > 0) return legacy;
+                // 2. 标题里的未读数，如 "(3) 飞书"（跨版本最稳的信号）
+                var m = (document.title || '').match(/\\((\\d+)\\)/);
+                if(m) return parseInt(m[1]);
+                // 3. 通用兜底：badge 相关 class 且可见的元素里，
+                //    内容是正数（含 99+）的都算未读；隐藏元素 textContent
+                //    仍有值，必须用 offsetParent 过滤，否则会把隐藏角标当未读
+                var badges = document.querySelectorAll('[class*="badge-count"], [class*="badgeCount"]');
+                var n = 0;
+                for(var i=0;i<badges.length;i++){
+                    if(badges[i].offsetParent === null) continue;
+                    var t = (badges[i].textContent || '').trim();
+                    var v = parseInt(t);
+                    if(!isNaN(v) && v > 0) n++;
+                }
+                return n;
+            })()`)
+            .then(function (result) {
+                const unread = parseInt(result) || 0
+                if (unread > 0) {
+                    startTrayBling();
+                } else {
+                    stopTrayBling();
+                }
+                maybeNotifyNewMessage(unread)
+            }).catch(function () {
+                // 页面导航/销毁瞬间的轮询失败可忽略
+            })
+        if (!showWarterMark) {
+            webContents.executeJavaScript(`if(document.getElementsByClassName('lark-water-mark-main').length > 0) document.getElementsByClassName('lark-water-mark-main')[0].remove()`)
         }
-        console.log("PAC 模式但未配置脚本地址，回退系统代理")
-    }
+    }, 1500)
+}
 
-    if(mode === 'fixed'){
-        const server = (configJson.proxyServer || "").trim()
-        if(server !== ""){
-            console.log("使用固定代理: " + server)
-            ses.setProxy({ proxyRules: server })
-            return
-        }
-        console.log("fixed 模式但未配置服务器地址，回退系统代理")
-    }
-
-    if(mode === 'direct'){
-        console.log("所有连接直连")
-        ses.setProxy({ mode: 'direct' })
+/**
+ * 新消息兜底通知（与页面 hook 通知互补，不依赖飞书前端实现方式）：
+ * - 首轮只建立基线不弹（否则启动时已有未读会立即轰炸）
+ * - 页面 hook 通知刚触发过（60s 内）则跳过，避免同一条消息弹两次
+ * - 用户正聚焦飞书窗口时不弹（与托盘闪烁的判断一致）
+ */
+function maybeNotifyNewMessage(currentUnread) {
+    if (!S.badgeBaselineReady) {
+        S.badgeBaselineReady = true
+        S.lastUnreadBadgeCount = currentUnread
         return
     }
-
-    // system 或无效配置：跟随系统代理
-    ses.setProxy({ mode: 'system' })
+    if (currentUnread > S.lastUnreadBadgeCount) {
+        const watching = S.onFocus && mainAlive() && S.mainWindow.isVisible()
+        if (!watching && Date.now() - S.lastHookNotifyTime > 60 * 1000) {
+            showSystemNotify({
+                title: "飞书新消息",
+                body: "收到新消息，点击查看",
+                onClick: function () { if (mainAlive()) S.mainWindow.show() },
+            })
+        }
+    }
+    S.lastUnreadBadgeCount = currentUnread
 }
 
-function getConfigJson(callback){
-    fs.readFile('config.json','utf-8',function(err,data){
-        if(err){
-            console.error("load config error, may be have no config file~");
-            callback({})
-        }
-        else{
-            console.log("read config json:" + data);
-            callback(JSON.parse(data))
-        }
-    });
-}
-
-
-// ------------------------ 程序菜单 --------------------------------
-// 应用不再显示菜单栏（所有入口集中到托盘菜单）
-// 需要开发者工具时可用快捷键 Ctrl+Shift+I
-
+// ============================ 8. 页面 hook ============================
 
 /**
- * 打开设置窗口
- * page 参数为设置页内的页签（如 about-info 直接打开"关于"页），可选
+ * 注入页面 js，两部分：
+ * 1) hack html5 的 Notification 接口与 ServiceWorkerRegistration.showNotification，
+ *    将通知内容转发到主进程（新版飞书可能改走 Service Worker 发通知）
+ * 2) 拦截聊天图片点击（大缩略图），改由主进程弹独立查看窗口；
+ *    表情包/头像（小图或 emoji/sticker/avatar 路径）不拦截，维持飞书原生行为
  */
-function openSettingsWindows(page){
-    let settingsWindow = null;
-    if(settingsWindow == null) {
-        settingsWindow = new BrowserWindow({
-            width: 700,
-            height: 650,
-            frame: false,
-            // height: 200,
-            resizable: false,
-            webPreferences: {
-                nodeIntegration: true,
-                contextIsolation: false
-            },
-        });
+function injectNotificationHook() {
+    const webContents = S.mainWebContents
+    if (webContents == null) return
 
-        // console.log(settingsWindow)
-        // settingsWindow.loadUrl('file://' + __dirname + '/app/settings.html');
-        settingsWindow.setMenuBarVisibility(false);
-        // 通过 hash 指定初始页签（如 #about-info 直接打开"关于"页）
-        let hash = (page != null && page !== '') ? ('#' + page) : ''
-        settingsWindow.loadURL('file://' +__dirname+ '/windows/views/settings.html' + hash);
-        // settingsWindow.toggleDevTools();
-    }
+    webContents.executeJavaScript(`
+        let ipcRenderer = null;
+        try{ipcRenderer = require('electron').ipcRenderer} catch(e) {}
+        let sendNotify = function(title, opt){
+            if(ipcRenderer == null) return false;
+            let sendMsg = JSON.stringify({ title: title, opt: opt })
+            try {
+                ipcRenderer.send("notification", sendMsg);
+                return true;
+            } catch (e) {
+                console.log("发送 ipc 消息报错", e);
+                return false;
+            }
+        }
+        let oldNotification = window.Notification;
+        // 飞书会持有 new Notification() 的返回值并调用其方法（如已读消息时
+        // close()），成功转发后返回 stub 对象而非 undefined，
+        // 否则飞书侧抛 "t.close is not a function"
+        let makeStub = function(title, opt){
+            let listeners = {}
+            let fire = function(type){
+                setTimeout(function(){
+                    let handlers = listeners[type] || []
+                    for(let i=0;i<handlers.length;i++) handlers[i]({type: type})
+                    let on = stub["on" + type]
+                    if(typeof on === 'function') on({type: type})
+                }, 0)
+            }
+            let stub = {
+                title: title,
+                body: opt && opt.body,
+                icon: opt && opt.icon,
+                tag: opt && opt.tag,
+                silent: !!(opt && opt.silent),
+                show: function(){},
+                close: function(){ fire('close') },
+                addEventListener: function(type, fn){
+                    (listeners[type] = listeners[type] || []).push(fn)
+                },
+                removeEventListener: function(type, fn){
+                    let arr = listeners[type] || []
+                    let idx = arr.indexOf(fn)
+                    if(idx >= 0) arr.splice(idx, 1)
+                },
+                dispatchEvent: function(){ return false }
+            }
+            return stub
+        }
+        let newNotification = function(title, opt){
+            console.log("hack-title:" + title);
+            console.log("hack-opt:" + JSON.stringify(opt));
+            if(!sendNotify(title, opt)) {
+                return new oldNotification(title,opt);
+            }
+            return makeStub(title, opt)
+        }
+        newNotification.requestPermission = oldNotification.requestPermission.bind(oldNotification);
+        Object.defineProperty(newNotification, 'permission', {
+            get: () => {
+                return oldNotification.permission;
+            }
+        });
+        window.Notification = newNotification;
+        if(window.ServiceWorkerRegistration && ServiceWorkerRegistration.prototype) {
+            let oldShow = ServiceWorkerRegistration.prototype.showNotification;
+            if(typeof oldShow === 'function') {
+                ServiceWorkerRegistration.prototype.showNotification = function(title, opt){
+                    console.log("hack-sw-title:" + title);
+                    console.log("hack-sw-opt:" + JSON.stringify(opt));
+                    sendNotify(title, opt);
+                    return oldShow.call(this, title, opt);
+                };
+            }
+        }
+        // ---- 聊天图片点击 → 独立查看窗口（替代飞书页面内全屏查看器）----
+        // 只拦截"图片消息"（大缩略图），表情包/头像维持飞书原生行为。
+        // 区分依据：图片消息缩略图有最小渲染尺寸（约 100px），而表情/头像
+        // 通常很小；尺寸过滤 + 链接特征双保险，避免误拦
+        if(!window.__elkImageHookInstalled) {
+            window.__elkImageHookInstalled = true;
+            var isChatImage = function(img){
+                // 表情/头像的常见路径特征，命中则不拦截
+                var s = (img.currentSrc || img.src || '').toLowerCase();
+                if(s.indexOf('/emoji/') >= 0 || s.indexOf('/sticker') >= 0
+                    || s.indexOf('/avatar') >= 0) return false;
+                // 图片消息缩略图足够大（容差取小值，适配小窗截图）
+                var w = img.naturalWidth || img.width || 0;
+                var h = img.naturalHeight || img.height || 0;
+                return w >= 100 && h >= 100;
+            }
+            document.addEventListener('click', function(ev){
+                var node = ev.target;
+                while(node && node !== document.body) {
+                    if(node.tagName === 'IMG') {
+                        if(isChatImage(node)) {
+                            var src = node.currentSrc || node.src || '';
+                            ev.stopPropagation();
+                            ev.preventDefault();
+                            try {
+                                ipcRenderer.send("open-image-window", src);
+                            } catch (e) {
+                                console.log("图片窗口 IPC 失败", e);
+                            }
+                        }
+                        return; // 命中 img 即结束（拦或放行都不再向上找）
+                    }
+                    node = node.parentNode;
+                }
+            }, true);
+        }`);
 }
 
-// ------------------------ App ------------------------------------
-app.on('ready', function () {
-
-    // 删除菜单栏，所有入口集中到托盘菜单
-    Menu.setApplicationMenu(null)
-
-    // 系统托盘设置
-    // 托盘图标
-    appTrayInit()
-
-    // 应用内文件下载处理
-    initDownload()
-
-    // globalShortcut.register('alt+shift+q', () => {
-    //     console.log("托盘销毁情况")
-    //     console.log(newAppTray.isDestroyed())
-    // })
-
-    globalShortcut.register('alt+shift+m', () => {
-        mainWindow.show()
-    })
-
-    // app on 了之后先进行 ajax 请求配置详情，成功之后再 createWindows
-    getConfigJson(function (json){
-        console.log(json)
-        // 先应用代理配置，再创建窗口，保证首个页面加载就按代理走
-        initProxy(json);
-        createWindow(json);
-    })
-
-})
-
-app.on('window-all-closed', () => {
-    app.quit();
-});
-
-app.on('activate', () => {
-    if (win == null) {
-        createWindow();
-    }
-})
-
-// 接受从载入页面发送过来的通知消息
-ipcMain.on("notification", (event, msg) => {
-    // console.log("收到消息")
-    // console.log(event)
-    // console.log(msg)
-    let args = JSON.parse(msg)
-    // let title = args.title;
-    // let opt = args.opt;
-    // console.log(args.title, args.opt);
-    // title 是对话框名称，opt 是聊天的具体内容，想看格式的话可以去掉上面那行注释
-    showLarkNotify(args.title, args.opt, args.opt.channelId)
-    event.returnValue = 'pong'
-})
-
-// 设置页发起的检查更新请求
-// 结果仅在主窗口右下角 toast 展示（设置页只保留"正在检查更新"提示）
-ipcMain.on("check-update", (event) => {
-    console.log("收到设置页检查更新请求")
-    updateChecker.check(true, function(){}, function(result){
-        showMainPageToast(result)
-    });
-    event.returnValue = 'ok'
-})
+// ============================ 9. 系统通知 ============================
 
 /**
- * 在主窗口(飞书页面)右下角弹 toast 展示检查结果
+ * 主进程弹系统通知的统一入口。
+ * opts: { title, body, onClick }
+ */
+function showSystemNotify(opts) {
+    if (!Notification.isSupported()) return null
+
+    const n = new Notification({
+        title: opts.title,
+        subtitle: opts.title,
+        body: opts.body,
+        icon: electron.nativeImage.createFromPath(appConf.dock32),
+    })
+
+    // 持有通知对象直到展示结束，防止 GC 导致 Windows toast 不显示/事件丢失
+    S.activeNotifications.add(n)
+    n.once('close', function () { S.activeNotifications.delete(n) })
+    n.once('failed', function () { S.activeNotifications.delete(n) })
+
+    if (opts.onClick) {
+        n.addListener('click', opts.onClick)
+    }
+
+    n.show()
+    return n
+}
+
+/**
+ * 在主窗口(飞书页面)右下角弹纯文本 toast（更新结果等）。
  * 页面环境无 mdui 可用，注入轻量自绘样式；3.5 秒后自动消失
  */
-function showMainPageToast(result){
-    if(mainWindow == null || mainWindow.isDestroyed() || webContents == null) return
-    let text = ""
-    if(result.type === 'newer'){
-        text = "发现新版本 " + (result.message.match(/[\d.]+.*?$/) || [''])[0] + "，可前往 GitHub 下载"
-    }else if(result.type === 'latest'){
-        text = "当前已是最新版本"
-    }else{
-        text = "检查更新失败：" + result.message
-    }
-    try{
-        webContents.executeJavaScript(`
+function showPageToast(text) {
+    if (!mainAlive() || S.mainWebContents == null) return
+    try {
+        S.mainWebContents.executeJavaScript(`
             (function(){
                 var old = document.getElementById('elk-update-toast');
                 if(old) old.remove();
@@ -609,52 +692,332 @@ function showMainPageToast(result){
                 toast.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;'
                     + 'background:rgba(33,33,33,0.92);color:#fff;padding:12px 20px;border-radius:8px;'
                     + 'font-size:14px;box-shadow:0 4px 16px rgba(0,0,0,0.3);'
-                    + 'max-width:360px;line-height:1.5;transition:opacity 0.4s;opacity:0;';
+                    + 'max-width:360px;line-height:1.5;';
                 document.body.appendChild(toast);
-                requestAnimationFrame(function(){ toast.style.opacity = '1'; });
-                setTimeout(function(){ toast.style.opacity = '0'; setTimeout(function(){ toast.remove(); }, 400); }, 3500);
+                setTimeout(function(){ toast.remove(); }, 3500);
             })();
         `)
-    }catch(e){
+    } catch (e) {
         console.log("主窗口 toast 注入失败:", e.message)
     }
 }
 
-// 设置页"调试模式"按钮：在主窗口打开开发者工具（关闭由用户在 DevTools 面板自行操作）
-ipcMain.on("toggle-devtools", (event, open) => {
-    console.log("收到开发者工具打开请求")
-    if(open === true && mainWindow != null && !mainWindow.isDestroyed()){
-        mainWindow.webContents.openDevTools()
+// 把更新检查结果转为 toast 文案并展示
+function showUpdateResultToast(result) {
+    let text = ""
+    if (result.type === 'newer') {
+        text = "发现新版本 " + (result.message.match(/[\d.]+.*?$/) || [''])[0] + "，可前往 GitHub 下载"
+    } else if (result.type === 'latest') {
+        text = "当前已是最新版本"
+    } else {
+        text = "检查更新失败：" + result.message
     }
-    event.returnValue = 'ok'
-})
+    showPageToast(text)
+}
 
-function showLarkNotify(title, opt, channelId){
-    if(Notification.isSupported()) {
-        let electronNotification = new Notification({
-            title: title,
-            subtitle : title,
-            body : opt.body,
-            icon: electron.nativeImage.createFromPath(appConf.dock32),
-        });
-        electronNotification.addListener('click', function(){
-            if(mainWindow != null) mainWindow.show();
-            // 通过注入 js 打开具体的对话聊天框
-            // 参考 https://github.com/Ericwyn/electron-lark/commit/f8c4781fab5c6cd704aa2bba4be0d4d0cedcaab1#commitcomment-51571446
-            if(webContents != null) {
-                try{webContents.executeJavaScript(`
-                    var doms = document.getElementsByTagName("div");
-                    for(let i =0;i<doms.length;i++){
-                        if(doms[i].getAttribute("data-feed-id") == '${channelId}') {
-                            doms[i].click();
-                            break;
-                        }
-                    }
-                `)}catch(e){
-                    console.log(e);
+// 通知点击：显示主窗口并注入 js 打开对应的聊天框
+// 参考 https://github.com/Ericwyn/electron-lark/commit/f8c4781fab5c6cd704aa2bba4be0d4d0cedcaab1#commitcomment-51571446
+function openChatByChannelId(channelId) {
+    if (!mainAlive()) return
+    S.mainWindow.show()
+    try {
+        S.mainWebContents.executeJavaScript(`
+            var doms = document.getElementsByTagName("div");
+            for(let i =0;i<doms.length;i++){
+                if(doms[i].getAttribute("data-feed-id") == '${channelId}') {
+                    doms[i].click();
+                    break;
                 }
             }
-        })
-        electronNotification.show();
+        `)
+    } catch (e) {
+        console.log(e)
     }
 }
+
+// ============================ 10. 托盘 ============================
+
+function startTrayBling() {
+    // 用户正看着主窗口时不闪烁
+    if (S.onFocus && mainAlive() && S.mainWindow.isVisible()) {
+        stopTrayBling()
+        return
+    }
+    if (S.blingTimer != null) return
+
+    S.bling = true
+    S.blingTimer = setInterval(function () {
+        S.blingCount++
+        if (S.blingCount % 2 == 0) {
+            S.tray.setImage(dock32EmptyIcon)
+        } else {
+            S.tray.setImage(dock32Icon)
+        }
+        // 避免 count 无限增大
+        if (S.blingCount == 1000) S.blingCount = 0
+    }, 500)
+}
+
+function stopTrayBling() {
+    if (!S.bling) return
+    if (S.blingTimer != null) {
+        clearInterval(S.blingTimer)
+        S.blingTimer = null
+    }
+    S.tray.setImage(dock32Icon)
+    S.bling = false
+}
+
+function initTray() {
+    const menu = Menu.buildFromTemplate([
+        {
+            label: '显示主界面',
+            click: function () {
+                if (mainAlive()) S.mainWindow.show()
+            }
+        },
+        {
+            label: '系统设置',
+            click: function () { openSettingsWindow() }
+        },
+        { type: 'separator' },
+        {
+            label: '退出程序',
+            click: function () {
+                console.log("从 tray 退出")
+                app.quit() // before-quit 置 isQuitting，主窗口 close 放行
+            }
+        },
+    ])
+
+    S.tray = new electron.Tray(dock32Icon)
+    S.tray.setToolTip('Feishu')
+    S.tray.setContextMenu(menu)
+
+    // 单击：切换主窗口显示/隐藏，并停止闪烁
+    S.tray.on('click', function () {
+        stopTrayBling()
+        if (!mainAlive()) return
+        S.mainWindow.isVisible() ? S.mainWindow.hide() : S.mainWindow.show()
+        S.mainWindow.isVisible() ? S.mainWindow.setSkipTaskbar(false) : S.mainWindow.setSkipTaskbar(true)
+    })
+
+    // 双击：仅显示
+    S.tray.on('double-click', function () {
+        if (mainAlive() && !S.mainWindow.isVisible()) S.mainWindow.show()
+    })
+}
+
+// ============================ 11. 设置窗口 ============================
+
+/**
+ * 打开设置窗口（单例：已打开则置顶聚焦，不再重复开窗）
+ * page 参数为设置页内的页签（如 about-info 直接打开"关于"页），可选
+ */
+function openSettingsWindow(page) {
+    if (S.settingsWindow != null && !S.settingsWindow.isDestroyed()) {
+        S.settingsWindow.show()
+        S.settingsWindow.focus()
+        // 页签请求（如 about-info）：调用页面内 showPage 切换（Vue 响应式），
+        // 同步 hash 保持一致；无请求则保持当前页签不动
+        if (page != null && page !== '') {
+            S.settingsWindow.webContents.executeJavaScript(
+                `if(location.hash !== '#${page}'){ location.hash = '#${page}'; }` +
+                `if(typeof showPage === 'function'){ showPage(${JSON.stringify(page)}); }`
+            ).catch(function () { /* 窗口销毁竞态可忽略 */ })
+        }
+        return
+    }
+
+    const win = new BrowserWindow({
+        width: 700,
+        height: 650,
+        frame: false,
+        resizable: false,
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false
+        },
+    })
+    S.settingsWindow = win
+    win.setMenuBarVisibility(false)
+
+    // 通过 hash 指定初始页签（如 #about-info 直接打开"关于"页）
+    const hash = (page != null && page !== '') ? ('#' + page) : ''
+    win.loadURL('file://' + __dirname + '/windows/views/settings.html' + hash)
+
+    // 窗口关闭后清空引用，下次可重新打开
+    win.on('closed', function () {
+        if (S.settingsWindow === win) S.settingsWindow = null
+    })
+}
+
+// ============================ 12. IPC ============================
+
+function registerIpcHandlers() {
+    // 页面通知 hook 转发来的消息（title 是聊天对象名，opt.body 是消息内容）
+    ipcMain.on("notification", (event, msg) => {
+        const args = JSON.parse(msg)
+        // 记录 hook 通知时间，兜底角标通知据此去重
+        S.lastHookNotifyTime = Date.now()
+        showSystemNotify({
+            title: args.title,
+            body: args.opt && args.opt.body,
+            onClick: function () { openChatByChannelId(args.opt && args.opt.channelId) },
+        })
+        event.returnValue = 'pong'
+    })
+
+    // 设置页：读取配置（页面不再直接 fs 读写，路径问题在主进程统一解决）
+    ipcMain.on("get-config", (event) => {
+        event.returnValue = loadConfig()
+    })
+
+    // 设置页：保存配置
+    ipcMain.on("save-config", (event, config) => {
+        event.returnValue = saveConfig(config)
+    })
+
+    // 设置页：应用版本号（关于页展示）
+    ipcMain.on("get-app-version", (event) => {
+        event.returnValue = app.getVersion()
+    })
+
+    // 设置页发起的检查更新请求
+    // 结果仅在主窗口右下角 toast 展示（设置页只保留"正在检查更新"提示）
+    ipcMain.on("check-update", (event) => {
+        console.log("收到设置页检查更新请求")
+        updateChecker.check(true, function () {}, showUpdateResultToast)
+        event.returnValue = 'ok'
+    })
+
+    // 设置页"调试模式"开关：打开/关闭主窗口开发者工具
+    // 状态不持久化，以主窗口 webContents 的真实状态为准
+    ipcMain.on("toggle-devtools", (event, open) => {
+        console.log("收到开发者工具开关请求: " + open)
+        if (mainAlive()) {
+            if (open === true) {
+                S.mainWebContents.openDevTools()
+            } else {
+                S.mainWebContents.closeDevTools()
+            }
+        }
+        event.returnValue = 'ok'
+    })
+
+    // 设置页查询开发者工具当前状态（打开设置页/切到调试页签时拉取）
+    ipcMain.on("query-devtools", (event) => {
+        event.returnValue = mainAlive() && S.mainWebContents.isDevToolsOpened()
+    })
+
+    // 通用：用系统默认浏览器打开外链（如设置页"前往项目主页"）
+    ipcMain.on("open-external", (event, url) => {
+        if (typeof url === 'string' && url.startsWith('http')) {
+            shell.openExternal(url)
+        }
+    })
+
+    // 页面 hook：聊天图片点击 → 独立可缩放查看窗口
+    ipcMain.on("open-image-window", (event, src) => {
+        openImageWindow(src)
+    })
+}
+
+// ============================ 13. App 生命周期 ============================
+
+// ----- App 级初始化（须在 ready 前执行的部分）-----
+
+if (process.mas) app.setName('飞书Feishu');
+
+// Windows 通知依赖 AUMID，需与 electron-builder NSIS 快捷方式写入的 appId 一致，
+// 否则打包后 Notification 全部静默不弹（消息提醒/更新提示/下载完成都会受影响）
+if (process.platform === 'win32') {
+    app.setAppUserModelId(APP_AUMID);
+}
+
+// userData 目录固定为 ElectronLark（与 NSIS 卸载脚本删除的目录一致）
+app.setPath('userData', path.join(app.getPath('appData'), 'ElectronLark'));
+
+// fixup High CPU Usage issue
+// see https://github.com/electron/electron/issues/11908
+app.disableHardwareAcceleration();
+
+// 修复 Application Menu 上图标不显示（Ubuntu GNOME）
+if (process.env.XDG_CURRENT_DESKTOP == 'ubuntu:GNOME') {
+    process.env.XDG_CURRENT_DESKTOP = 'Unity';
+}
+
+// 单实例锁：重复启动（再点一次快捷方式）聚焦已有窗口，而不是开第二套
+if (!app.requestSingleInstanceLock()) {
+    app.quit()
+} else {
+    app.on('second-instance', function () {
+        if (mainAlive()) {
+            if (!S.mainWindow.isVisible()) S.mainWindow.show()
+            S.mainWindow.focus()
+        }
+    })
+}
+
+// 托盘退出/关机 → 标记真正退出，主窗口 close 拦截放行
+app.on('before-quit', function () {
+    S.isQuitting = true
+})
+
+// 焦点状态跟踪（托盘闪烁/兜底通知据此判断用户是否正在看消息）
+app.on('browser-window-blur', function () { S.onFocus = false })
+app.on('browser-window-focus', function () { S.onFocus = true })
+
+// 右键菜单：electron-context-menu 4.x 起为纯 ESM 包，
+// 主进程(CommonJS)需用动态 import() 加载
+import('electron-context-menu').then(contextMenu => {
+    contextMenu.default({
+        showInspectElement: false,
+        showCopyImage: true,
+        showCopyImageAddress: true,
+        showSaveImageAs: true,
+        labels: {
+            copy: '复制',
+            copyImage: '复制图片',
+            copyImageAddress: '复制图片地址',
+            saveImageAs: '图片另存为',
+        },
+    });
+}).catch(err => console.error("electron-context-menu 加载失败:", err));
+
+// ----- ready：装配 -----
+
+app.on('ready', function () {
+    // 应用不显示菜单栏（所有入口集中到托盘菜单）
+    // 需要开发者工具时可用快捷键 Ctrl+Shift+I 或设置页"调试模式"开关
+    Menu.setApplicationMenu(null)
+
+    // 旧版本配置遗留在工作目录的话，先迁入 userData
+    migrateLegacyConfig()
+    const config = loadConfig()
+
+    // 会话初始化（UA/权限/代理/下载）须在建窗之前，保证首屏即按代理走
+    initSession(config)
+
+    initTray()
+    registerIpcHandlers()
+    createMainWindow(config)
+
+    // 显示主窗口快捷键
+    globalShortcut.register('alt+shift+m', () => {
+        if (mainAlive()) S.mainWindow.show()
+    })
+})
+
+app.on('window-all-closed', () => {
+    // 主窗口 close 被拦截（隐藏到托盘）时不会到这里；
+    // 能到这里说明所有窗口真的关了（正在退出）
+    app.quit();
+})
+
+// macOS dock 图标点击（本应用主要发布 Windows/Linux，保留兜底）
+app.on('activate', function () {
+    if (!mainAlive()) {
+        createMainWindow(loadConfig())
+    }
+})

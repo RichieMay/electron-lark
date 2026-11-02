@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 
 <head>
     <meta charset="UTF-8">
@@ -21,12 +21,6 @@
             display: none;
         }
 
-        /*.doc-title {*/
-        /*    font-size: 34px;*/
-        /*    line-height: 40px;*/
-        /*    margin: 0 400px 30px 0;*/
-        /*}*/
-
         .container{
             padding-right: 60px;
         }
@@ -45,14 +39,6 @@
             margin-bottom: 40px;
         }
 
-        .loadPage{
-            position: fixed;
-            width: 100%;
-            height: 100%;
-            background: white;
-            z-index: 100;
-        }
-
         .drawer-item {
             font-size: 16px;
         }
@@ -63,193 +49,189 @@
 <body class="mdui-theme-primary-blue" >
 
 <div class="mdui-container-fluid" id="page" v-cloak>
+    <!-- 右上角返回（关闭）按钮 -->
     <div class="close-panel" >
         <button class="mdui-btn mdui-color-white mdui-text-color-gray"
             style="position: fixed;top: 30px;right:0px;"
             onclick="exitSetting()"
             >返回</button>
     </div>
-    <div class="loadPage"  v-if="!handLoadStorage">
-        <div class="mdui-spinner mdui-center" style="margin-top: calc(45vh)">
-            <div class="mdui-spinner-layer ">
-                <div class="mdui-spinner-circle-clipper mdui-spinner-left">
-                    <div class="mdui-spinner-circle"></div>
-                </div>
-                <div class="mdui-spinner-gap-patch">
-                    <div class="mdui-spinner-circle"></div>
-                </div>
-                <div class="mdui-spinner-circle-clipper mdui-spinner-right">
-                    <div class="mdui-spinner-circle"></div>
-                </div>
-            </div>
-        </div>
-        <div style="text-align: center">
-            <p>正在载入设置选项...</p>
+
+    <!-- 左侧页签导航 -->
+    <div style="height: calc(100vh);position: fixed;width: 150px;top:20px">
+        <div class="drawer">
+            <ul class="mdui-list">
+                <li class="mdui-list-item mdui-ripple" onclick="showPage('link-set')">
+                    <div class="mdui-list-item-content drawer-item">外链设置</div>
+                </li>
+                <li class="mdui-list-item mdui-ripple" onclick="showPage('wartermark-set')">
+                    <div class="mdui-list-item-content drawer-item">水印设置</div>
+                </li>
+                <li class="mdui-list-item mdui-ripple" onclick="showPage('host-set')">
+                    <div class="mdui-list-item-content drawer-item">登录设置</div>
+                </li>
+                <li class="mdui-list-item mdui-ripple" onclick="showPage('proxy-set')">
+                    <div class="mdui-list-item-content drawer-item">网络代理</div>
+                </li>
+                <li class="mdui-list-item mdui-ripple" onclick="showPage('debug-set')">
+                    <div class="mdui-list-item-content drawer-item">调试模式</div>
+                </li>
+                <li class="mdui-list-item mdui-ripple" onclick="showPage('about-info')">
+                    <div class="mdui-list-item-content drawer-item">关于</div>
+                </li>
+            </ul>
         </div>
     </div>
-    <div v-else class="">
-        <div class="" style="height: calc(100vh);position: fixed;width: 150px;top:20px">
-            <div class="drawer">
-                <ul class="mdui-list">
-                    <li class="mdui-list-item mdui-ripple" onclick="showPage('link-set')">
-                        <div class="mdui-list-item-content drawer-item">外链设置</div>
-                    </li>
-                    <li class="mdui-list-item mdui-ripple" onclick="showPage('wartermark-set')">
-                        <div class="mdui-list-item-content drawer-item">水印设置</div>
-                    </li>
-                    <li class="mdui-list-item mdui-ripple" onclick="showPage('host-set')">
-                        <div class="mdui-list-item-content drawer-item">登录设置</div>
-                    </li>
-                    <li class="mdui-list-item mdui-ripple" onclick="showPage('proxy-set')">
-                        <div class="mdui-list-item-content drawer-item">网络代理</div>
-                    </li>
-                    <li class="mdui-list-item mdui-ripple" onclick="showPage('debug-set')">
-                        <div class="mdui-list-item-content drawer-item">调试模式</div>
-                    </li>
-                    <li class="mdui-list-item mdui-ripple" onclick="showPage('about-info')">
-                        <div class="mdui-list-item-content drawer-item">关于</div>
-                    </li>
-                </ul>
+
+    <!-- 右侧内容区 -->
+    <div class="container" style="padding-left: 180px">
+
+        <!-- 登录设置 -->
+        <div v-if="pageShow==='host-set'">
+            <div class="set-title-panel">
+                <p class="doc-title">登录设置</p>
+            </div>
+            <div class="set-content-panel">
+                <p>默认网页版飞书登录页，你可在下方设置自定义地址，保存后重启后生效。</p>
+                <p></p>
+                <div class="mdui-textfield">
+                    <textarea class="mdui-textfield-input"
+                              placeholder="https://feishu.cn/messenger/"
+                              v-model="startPageLink"></textarea>
+                </div>
+
             </div>
         </div>
-        <div class="container" style="padding-left: 180px">
-            <div v-if="pageShow==='host-set'">
-                <div class="set-title-panel">
-                    <p class="doc-title">登录设置</p>
-                </div>
-                <div class="set-content-panel">
-                    <p>默认网页版飞书登录页，你可在下方设置自定义地址，保存后重启后生效。</p>
-                    <p></p>
-                    <div class="mdui-textfield">
-                        <textarea class="mdui-textfield-input"
-                                  placeholder="https://feishu.cn/messenger/"
-                                  v-model="startPageLink"></textarea>
-                    </div>
 
-                </div>
+        <!-- 水印设置 -->
+        <div v-if="pageShow==='wartermark-set'">
+            <div class="set-title-panel">
+                <p class="doc-title">水印设置</p>
             </div>
-
-
-            <div v-if="pageShow==='wartermark-set'">
-                <div class="set-title-panel">
-                    <p class="doc-title">水印设置</p>
-                </div>
-                <div class="set-content-panel">
+            <div class="set-content-panel">
+                <label class="mdui-switch">
+                    <span style="margin-right:20px">显示页面水印</span>
                     <label class="mdui-switch">
-                        <span style="margin-right:20px">显示页面水印</span>
-                        <label class="mdui-switch">
-                            <input type="checkbox" v-model="showWarterMark">
-                            <i class="mdui-switch-icon"></i>
-                          </label>
-                    </label>
-                    <br><br>
-                    <p>打开后将会显示飞书水印，保存后重启后生效。</p>
+                        <input type="checkbox" v-model="showWarterMark">
+                        <i class="mdui-switch-icon"></i>
+                      </label>
+                </label>
+                <br><br>
+                <p>打开后将会显示飞书水印，保存后重启后生效。</p>
+            </div>
+        </div>
+
+        <!-- 外链设置 -->
+        <div v-if="pageShow==='link-set'">
+            <div class="set-title-panel">
+                <p class="doc-title">外链设置</p>
+            </div>
+            <div class="set-content-panel">
+                <p>应用内打开的链接（每行一个），其他链接默认使用系统浏览器打开，保存后重启后生效。</p>
+                <p></p>
+
+                <div class="mdui-textfield" style="margin-top: 20px;">
+                <textarea class="mdui-textfield-input"
+                          v-model="larkOpenLink"
+                          style="background: #f1f1f1; padding: 10px" rows="10"
+                          placeholder="请在此处设置需在应用内打开的链接，如&#13;&#10;https://github.com&#13;&#10;https://google.com"></textarea>
                 </div>
             </div>
+        </div>
 
-            <div v-if="pageShow==='link-set'">
-                <div class="set-title-panel">
-                    <p class="doc-title">外链设置</p>
+        <!-- 网络代理 -->
+        <div v-if="pageShow==='proxy-set'">
+            <div class="set-title-panel">
+                <p class="doc-title">网络代理</p>
+            </div>
+            <div class="set-content-panel">
+                <p>设置应用程序的网络代理，保存后重启后生效。</p>
+                <p></p>
+
+                <label class="mdui-radio" style="display: block; margin: 14px 0;">
+                    <input type="radio" name="proxy-mode" value="direct" v-model="proxyMode">
+                    <i class="mdui-radio-icon"></i>
+                    <span style="margin-left: 6px">网络直连</span>
+                </label>
+                <label class="mdui-radio" style="display: block; margin: 14px 0;">
+                    <input type="radio" name="proxy-mode" value="system" v-model="proxyMode">
+                    <i class="mdui-radio-icon"></i>
+                    <span style="margin-left: 6px">系统代理</span>
+                </label>
+                <label class="mdui-radio" style="display: block; margin: 14px 0;">
+                    <input type="radio" name="proxy-mode" value="pac" v-model="proxyMode">
+                    <i class="mdui-radio-icon"></i>
+                    <span style="margin-left: 6px">自动配置</span>
+                </label>
+                <label class="mdui-radio" style="display: block; margin: 14px 0;">
+                    <input type="radio" name="proxy-mode" value="fixed" v-model="proxyMode">
+                    <i class="mdui-radio-icon"></i>
+                    <span style="margin-left: 6px">手动配置</span>
+                </label>
+
+                <div v-if="proxyMode==='direct'" style="margin-top: 25px;">
+                    <p>所有连接直连，不使用任何代理</p>
                 </div>
-                <div class="set-content-panel">
-                    <p>应用内打开的链接（每行一个），其他链接默认使用系统浏览器打开，保存后重启后生效。</p>
-                    <p></p>
-
-                    <div class="mdui-textfield" style="margin-top: 20px;">
-                    <textarea class="mdui-textfield-input"
-                              v-model="larkOpenLink"
-                              style="background: #f1f1f1; padding: 10px" rows="10"
-                              placeholder="请在此处设置需在应用内打开的链接，如&#13;&#10;https://github.com&#13;&#10;https://google.com"></textarea>
+                <div v-if="proxyMode==='pac'" style="margin-top: 25px;">
+                    <div class="mdui-textfield">
+                        <label class="mdui-textfield-label">PAC 脚本网址或本地文件路径</label>
+                        <input class="mdui-textfield-input" type="text" v-model="proxyPacUrl"
+                               placeholder="https://example.com/proxy.pac 或 file:///C:/proxy/auto-proxy.pac">
+                    </div>
+                </div>
+                <div v-if="proxyMode==='fixed'" style="margin-top: 25px;">
+                    <div class="mdui-textfield">
+                        <label class="mdui-textfield-label">代理服务器地址（支持 http/https/socks4/socks5）</label>
+                        <input class="mdui-textfield-input" type="text" v-model="proxyServer"
+                               placeholder="http://192.168.2.1:1081 或 socks5://192.168.2.1:1080">
                     </div>
                 </div>
             </div>
+        </div>
 
-            <div v-if="pageShow==='proxy-set'">
-                <div class="set-title-panel">
-                    <p class="doc-title">网络代理</p>
-                </div>
-                <div class="set-content-panel">
-                    <p>设置应用程序的网络代理，保存后重启后生效。</p>
-                    <p></p>
-
-                    <label class="mdui-radio" style="display: block; margin: 14px 0;">
-                        <input type="radio" name="proxy-mode" value="direct" v-model="proxyMode">
-                        <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">网络直连</span>
-                    </label>
-                    <label class="mdui-radio" style="display: block; margin: 14px 0;">
-                        <input type="radio" name="proxy-mode" value="system" v-model="proxyMode">
-                        <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">系统代理</span>
-                    </label>
-                    <label class="mdui-radio" style="display: block; margin: 14px 0;">
-                        <input type="radio" name="proxy-mode" value="pac" v-model="proxyMode">
-                        <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">自动配置</span>
-                    </label>
-                    <label class="mdui-radio" style="display: block; margin: 14px 0;">
-                        <input type="radio" name="proxy-mode" value="fixed" v-model="proxyMode">
-                        <i class="mdui-radio-icon"></i>
-                        <span style="margin-left: 6px">手动配置</span>
-                    </label>
-
-                    <div v-if="pageShow==='proxy-set' && proxyMode==='direct'" style="margin-top: 25px;">
-                        <p>所有连接直连，不使用任何代理</p>
-                    </div>
-                    <div v-if="pageShow==='proxy-set' && proxyMode==='pac'" style="margin-top: 25px;">
-                        <div class="mdui-textfield">
-                            <label class="mdui-textfield-label">PAC 脚本网址或本地文件路径</label>
-                            <input class="mdui-textfield-input" type="text" v-model="proxyPacUrl"
-                                   placeholder="https://example.com/proxy.pac 或 file:///C:/proxy/auto-proxy.pac">
-                        </div>
-                    </div>
-                    <div v-if="pageShow==='proxy-set' && proxyMode==='fixed'" style="margin-top: 25px;">
-                        <div class="mdui-textfield">
-                            <label class="mdui-textfield-label">代理服务器地址（支持 http/https/socks4/socks5）</label>
-                            <input class="mdui-textfield-input" type="text" v-model="proxyServer"
-                                   placeholder="http://192.168.2.1:1081 或 socks5://192.168.2.1:1080">
-                        </div>
-                    </div>
-                </div>
+        <!-- 调试模式 -->
+        <div v-if="pageShow==='debug-set'">
+            <div class="set-title-panel">
+                <p class="doc-title">调试模式</p>
             </div>
-
-            <div v-if="pageShow==='debug-set'">
-                <div class="set-title-panel">
-                    <p class="doc-title">调试模式</p>
-                </div>
-                <div class="set-content-panel">
-                    <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
-                        onclick="btnOpenDevToolsClick()">启用开发者工具</button>
-                    <br><br>
-                    <p>点击打开开发者工具</p>
-                </div>
+            <div class="set-content-panel">
+                <label class="mdui-switch">
+                    <span style="margin-right:20px">启用开发者工具</span>
+                    <label class="mdui-switch">
+                        <input type="checkbox" v-model="devToolsOpened" @change="btnDevToolsSwitchChange">
+                        <i class="mdui-switch-icon"></i>
+                    </label>
+                </label>
+                <br><br>
+                <p>开关主窗口的开发者工具（在主窗口中显示），状态不持久化。</p>
             </div>
+        </div>
 
-            <div v-if="pageShow==='about-info'">
-                <div class="set-title-panel">
-                    <p class="doc-title">关于</p>
-                </div>
-                <div class="set-content-panel" style="text-align: center;">
-                    <img src="../../../icon/128.png" style="width: 72px; height: 72px;"/>
-                    <p style="font-size: 22px; margin-top: 10px;">ElectronLark</p>
-                    <p style="color: #9e9e9e; font-size: 14px;">当前版本 {{packageVersion}}</p>
-                    <p style="color: #616161; font-size: 13px; margin-top: 16px;">基于网页版飞书开发，能满足基础功能使用。</p>
-                    <br>
-                    <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
-                        onclick="btnCheckUpdateClick()">检查更新</button>
-                    <br><br>
-                    <div>
-                        <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
-                            onclick="gotoProjectHome()">前往项目主页</button>
-                    </div>
-                </div>
+        <!-- 关于 -->
+        <div v-if="pageShow==='about-info'">
+            <div class="set-title-panel">
+                <p class="doc-title">关于</p>
             </div>
-
-            <div v-if="pageShow !='about-info' && pageShow !='debug-set'" class="set-save-panel">
+            <div class="set-content-panel" style="text-align: center;">
+                <img src="../../../icon/128.png" style="width: 72px; height: 72px;"/>
+                <p style="font-size: 22px; margin-top: 10px;">ElectronLark</p>
+                <p style="color: #9e9e9e; font-size: 14px;">当前版本 {{packageVersion}}</p>
+                <p style="color: #616161; font-size: 13px; margin-top: 16px;">基于网页版飞书开发，能满足基础功能使用。</p>
+                <br>
                 <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
-                        onclick="btnSaveClick()">保存设置</button>
+                    onclick="btnCheckUpdateClick()">检查更新</button>
+                <br><br>
+                <div>
+                    <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
+                        onclick="gotoProjectHome()">前往项目主页</button>
+                </div>
             </div>
+        </div>
 
+        <!-- 保存按钮（关于/调试页签无需保存） -->
+        <div v-if="pageShow !='about-info' && pageShow !='debug-set'" class="set-save-panel">
+            <button class="mdui-btn mdui-color-blue mdui-text-color-white mdui-ripple"
+                    onclick="btnSaveClick()">保存设置</button>
         </div>
 
     </div>
@@ -262,17 +244,14 @@
 <script src="mdui.min.js" type="text/javascript"></script>
 <script>
 
-    let appStoreFs = require("fs");
+    // 配置读写全部经 IPC 由主进程完成（落 userData，路径问题统一在主进程解决），
+    // 页面不再直接 require('fs') 操作文件
+    const ipc = require('electron').ipcRenderer
 
-    console.log("载入 electron-store 成功")
-    console.log(appStoreFs)
-
-    const KEY_START_PAGE = "startPageLink"
-    const KEY_LARK_OPEN_LINK = "larkOpenLink"
+    // ======================== 页面状态 ========================
 
     let pageData = {
         pageShow: 'link-set',
-        handLoadStorage: true,
         startPageLink: null, // 启动页设置
         larkOpenLink: null, // 需要在 electron 内打开的链接
         showWarterMark: false,
@@ -281,48 +260,67 @@
         proxyServer: null, // 固定代理服务器地址
         packageVersion: "未知版本",
         checkingUpdate: false, // 是否正在检查更新
+        devToolsOpened: false, // 开发者工具状态（实时拉取，不持久化）
     };
-
-    getConfigJson();
 
     let vuePage = new Vue({
         el: "#page",
         data: pageData,
         methods: {
-
+            // 调试模式开关：通知主进程开/关开发者工具（不持久化，状态以主进程为准）
+            btnDevToolsSwitchChange: function(){
+                ipc.sendSync("toggle-devtools", pageData.devToolsOpened === true)
+            },
         }
     });
 
-    // 调试模式按钮：在主窗口打开开发者工具（关闭由用户在 DevTools 面板自行操作）
-    function btnOpenDevToolsClick(){
-        try{
-            require('electron').ipcRenderer.send("toggle-devtools", true)
-        }catch(e){
-            console.log(e)
-        }
-    }
-
-    // 读取版本信息
-    try{
-        const path = require('path')
-        let packageVersion = require(path.join(__dirname, './../../../package.json')).version
-        pageData.packageVersion = packageVersion;
-    }catch(e) {}
+    // ======================== 页签导航 ========================
 
     function showPage(page){
         pageData.pageShow = page
+        if(page === 'debug-set') syncDevToolsState()
     }
 
-    // 支持通过 URL hash 直接定位页签（托盘"关于"入口用）
-    try{
-        let hashPage = decodeURIComponent(window.location.hash.replace('#', ''))
-        if(hashPage !== ''){
-            pageData.pageShow = hashPage
-        }
-    }catch(e){}
+    // 拉取开发者工具真实状态（主窗口里用户可能已手动关闭 DevTools）
+    function syncDevToolsState(){
+        pageData.devToolsOpened = ipc.sendSync("query-devtools") === true
+    }
+
+    // 主进程推送 DevTools 开关状态（用户在主窗口 X 掉 DevTools 时也联动）
+    ipc.on('devtools-state-changed', function(event, isOpen){
+        pageData.devToolsOpened = isOpen === true
+    })
+
+    // ======================== 配置读写（经 IPC） ========================
+
+    function loadConfigToPage(){
+        let config = ipc.sendSync("get-config")
+        pageData.startPageLink = config.startPageLink
+        pageData.larkOpenLink = config.larkOpenLink
+        pageData.showWarterMark = config.showWarterMark
+        pageData.proxyMode = config.proxyMode || 'system'
+        pageData.proxyPacUrl = config.proxyPacUrl
+        pageData.proxyServer = config.proxyServer
+    }
+
+    function saveConfigFromPage(){
+        let ok = ipc.sendSync("save-config", {
+            startPageLink: pageData.startPageLink,
+            larkOpenLink: pageData.larkOpenLink,
+            showWarterMark: pageData.showWarterMark,
+            proxyMode: pageData.proxyMode,
+            proxyPacUrl: pageData.proxyPacUrl,
+            proxyServer: pageData.proxyServer,
+        })
+        mdui.snackbar({
+            message: ok ? '配置保存成功' : '配置保存失败，详见主进程日志'
+        })
+    }
+
+    // ======================== 按钮事件 ========================
 
     function btnSaveClick(){
-       saveConfig()
+       saveConfigFromPage()
     }
 
     // 检查更新走主进程 IPC；结果在主窗口右下角 toast 展示
@@ -331,7 +329,7 @@
         pageData.checkingUpdate = true
         mdui.snackbar({ message: '正在检查更新' })
         try{
-            require('electron').ipcRenderer.send("check-update")
+            ipc.send("check-update")
         }catch(e){
             console.log(e)
             pageData.checkingUpdate = false
@@ -342,59 +340,30 @@
         }, 20000)
     }
 
-    function getConfigJson(){
-        if(appStoreFs == null) return
-        appStoreFs.readFile('config.json','utf-8',function(err,data){
-            if(err){
-                console.log(err)
-                console.log("读取json配置文件失败")
-            }
-            else{
-                console.log("read config json:" + data);
-                let configJson = JSON.parse(data);
-                pageData.startPageLink = configJson.startPageLink;
-                pageData.larkOpenLink = configJson.larkOpenLink;
-                pageData.showWarterMark = configJson.showWarterMark;
-                pageData.proxyMode = configJson.proxyMode || 'system';
-                pageData.proxyPacUrl = configJson.proxyPacUrl;
-                pageData.proxyServer = configJson.proxyServer;
-            }
-        });
-    }
-
-    function saveConfig(){
-        if (appStoreFs == null) {
-            console.log("fs 载入失败")
-            return;
-        }
-        let configJson = {
-            startPageLink: pageData.startPageLink,
-            larkOpenLink: pageData.larkOpenLink,
-            showWarterMark: pageData.showWarterMark,
-            proxyMode: pageData.proxyMode,
-            proxyPacUrl: pageData.proxyPacUrl,
-            proxyServer: pageData.proxyServer,
-        }
-        appStoreFs.writeFile("config.json",JSON.stringify(configJson, null, "  "),function (err) {
-            if(err){
-                console.log(err);
-            }else{
-                console.log("配置保存成功")
-                mdui.snackbar({
-                    message: '配置保存成功'
-                });
-
-            }
-        })
-    }
-
     function exitSetting(){
-        window.close();
+        window.close()
     }
 
     function gotoProjectHome(){
-        require('electron').shell.openExternal('https://github.com/RichieMay/electron-lark')
+        ipc.send("open-external", 'https://github.com/RichieMay/electron-lark')
     }
+
+    // ======================== 初始化 ========================
+
+    // 读取持久化配置
+    loadConfigToPage()
+
+    // 应用版本号（主进程提供，页面不再读 package.json）
+    pageData.packageVersion = ipc.sendSync("get-app-version")
+
+    // 支持通过 URL hash 直接定位页签（托盘"关于"入口用）
+    try{
+        let hashPage = decodeURIComponent(window.location.hash.replace('#', ''))
+        if(hashPage !== ''){
+            pageData.pageShow = hashPage
+            if(hashPage === 'debug-set') syncDevToolsState()
+        }
+    }catch(e){}
 
 </script>
 </html>

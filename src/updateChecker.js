@@ -5,14 +5,17 @@ const Notification = electron.Notification;
 
 const appConf = require("./configuration")
 
+// 状态文件落 userData（安装目录不可写，不能用相对路径）
+const updateStateFile = path.join(electron.app.getPath('userData'), 'updateCheck.json')
+
 let updateCheckJson;
 
 function getConfigJson(callback){
     if(appStoreFs == null) return
-    appStoreFs.readFile('updateCheck.json','utf-8',function(err,data){
+    appStoreFs.readFile(updateStateFile,'utf-8',function(err,data){
         if(err){
             console.log(err)
-            console.log("读取json配置文件失败")
+            console.log("读取更新状态文件失败（首次启动属正常）")
             updateCheckJson = {
                 lastCheckUpdateTimeStamp: 0
             }
@@ -30,7 +33,7 @@ function saveConfig(){
         console.log("fs 载入失败")
         return;
     }
-    appStoreFs.writeFile("updateCheck.json",JSON.stringify(updateCheckJson, null, "  "),function (err) {
+    appStoreFs.writeFile(updateStateFile,JSON.stringify(updateCheckJson, null, "  "),function (err) {
         if(err){
             console.log(err);
         }else{

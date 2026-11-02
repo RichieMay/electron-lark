@@ -1,7 +1,7 @@
 'use strict';
 
 // ============================================================================
-// electron-lark 主进程（单文件分层，自上而下依赖单向）
+// electron-lark 主进程（单文件分层，自上而下依赖单向；页面 hook 见 preload.js）
 //
 //   1. 常量           —— 不变的配置项
 //   2. 运行时状态      —— 全部可变状态集中声明，禁止散落
@@ -10,12 +10,11 @@
 //   5. 会话初始化      —— UA / 权限 / 代理 / 下载（创建窗口前调用）
 //   6. 主窗口          —— 创建、登录态尺寸切换、新窗口外链分发、图片独立查看窗口
 //   7. 未读角标轮询    —— 角标 → 托盘闪烁 + 兜底通知
-//   8. 页面 hook       —— 通知拦截（Notification/SW）+ 图片点击改独立窗口
-//   9. 系统通知        —— 主进程弹通知 + 页面 toast
-//  10. 托盘            —— 图标、菜单、闪烁
-//  11. 设置窗口        —— 单例
-//  12. IPC             —— 全部频道收口在这里
-//  13. App 生命周期    —— 入口编排，只做装配，不写具体逻辑
+//   8. 系统通知        —— 主进程弹通知 + 页面 toast
+//   9. 托盘            —— 图标、菜单、闪烁
+//  10. 设置窗口        —— 单例
+//  11. IPC             —— 全部频道收口在这里
+//  12. App 生命周期    —— 入口编排，只做装配，不写具体逻辑
 // ============================================================================
 
 const appConf = require("./configuration")
@@ -286,14 +285,12 @@ function createMainWindow(config) {
         minHeight: 600,
         resizable: true,
         webPreferences: {
-            // 飞书页面需要 require('electron').ipcRenderer 供通知 hook 使用，
-            // 暂维持 nodeIntegration（后续如需收紧安全，引入 preload +
-            // contextBridge 暴露最小 API 即可，页面侧只需改 sendNotify 一处）
+            // 页面 hook（通知转发 + 图片点击拦截）放在 preload，
+            // 每个新文档自动执行，时序确定（详见 preload.js 头注释）
+            preload: path.join(__dirname, 'preload.js'),
             nodeIntegration: true,
             contextIsolation: false,
-            // 隐藏到托盘后禁止后台节流：新版 Chromium 会冻结/降频隐藏页面的
-            // 定时器与消息回调，导致角标不更新（托盘不闪）、消息在窗口
-            // 重新显示后才被处理。作为常驻 IM 必须保持后台全速运行
+            // 常驻 IM：隐藏到托盘后禁止后台节流，否则角标停更、消息延迟处理
             backgroundThrottling: false,
         },
         icon: appConf.icon128
@@ -353,11 +350,11 @@ function createMainWindow(config) {
         }
     })
 
-    // 每次页面加载完成后（重）启动轮询、注入页面 hook（通知 + 图片点击拦截）
-    webContents.on('did-finish-load', function () {
+    // 页面 DOM 就绪后（重）启动轮询与更新检查。
+    // 不用 did-finish-load：它要求页面完全加载(complete)，而新版飞书有
+    // 永不结束的资源加载（SSE 长连接等），事件可能永远不触发
+    webContents.on('dom-ready', function () {
         startBadgePoll(!!config.showWarterMark)
-        injectNotificationHook()
-        // 检查新版本：启动静默检查一次，之后每天 16:00 再定时检查
         updateChecker.checkInAppStart();
         updateChecker.startDailyCheck();
     })
@@ -401,15 +398,75 @@ function createMainWindow(config) {
 }
 
 /**
- * 聊天图片独立查看窗口：
- * 飞书图片查看器是页面内全屏遮罩（占用整个应用窗口且不可缩放），
- * 这里改为弹出独立小窗加载图片本体，支持拖拽缩放窗口、Ctrl+滚轮缩放。
- * 同 session（默认会话）加载，大图鉴权 cookie 自动携带
+ * 聊天图片独立查看窗口（替代飞书页面内全屏查看器）。
+ * 图片包一层 HTML 由页面脚本接管布局（Chromium 原生图片文档的适应尺寸
+ * 在加载时固定，不跟随窗口变化）：
+ * - 居中自适应窗口大小
+ * - Shift/Ctrl+滚轮以鼠标位置为中心缩放（0.1~10 倍），普通滚轮平移
+ * - 双击切换"适应窗口 / 像素原大"，右上角短暂显示缩放百分比
+ * src 为 preload 转换的 dataURL 或 http 直链（挂默认会话带登录态）
  */
 function openImageWindow(src) {
     if (typeof src !== 'string' || src === '') return
     const isDataUrl = src.startsWith('data:')
     if (!isDataUrl && !/^https?:/i.test(src)) return
+
+    // 图片查看页脚本：接管布局后 max-width/max-height 由 JS 显式尺寸取代，
+    // 缩放锚点取鼠标位置（未放大时滚动量为 0，公式自然退化为居中缩放）
+    const pageScript = "var stage=document.getElementById('stage'),view=document.getElementById('view'),tip=document.getElementById('tip');"
+        + "var z=1,fit=1,ready=false,tipTimer=null;"
+        + "function showTip(t){tip.textContent=t;tip.style.opacity=1;"
+        + " clearTimeout(tipTimer);tipTimer=setTimeout(function(){tip.style.opacity=0},900);}"
+        + "function apply(){"
+        + " if(!ready)return;"
+        + " fit=Math.min(stage.clientWidth/view.naturalWidth,stage.clientHeight/view.naturalHeight,1);"
+        + " if(!(fit>0))fit=1;"
+        + " view.style.width=Math.round(view.naturalWidth*fit*z)+'px';"
+        + " view.style.height='auto';"
+        + " showTip(Math.round(fit*z*100)+'%');"
+        + "}"
+        + "function zoomAt(x,y,f){"
+        + " if(!ready)return;"
+        + " var ow=view.width,oh=view.height;"
+        + " z=Math.min(10,Math.max(0.1,z*f));"
+        + " apply();"
+        + " if(ow>0&&oh>0){"
+        + "  stage.scrollLeft=(stage.scrollLeft+x)*(view.width/ow)-x;"
+        + "  stage.scrollTop=(stage.scrollTop+y)*(view.height/oh)-y;"
+        + " }"
+        + "}"
+        + "view.addEventListener('load',function(){"
+        + " ready=view.naturalWidth>0&&view.naturalHeight>0;"
+        + " view.style.maxWidth='none';view.style.maxHeight='none';"
+        + " if(!ready){showTip('图片加载失败');return}"
+        + " apply();"
+        + "});"
+        + "view.addEventListener('error',function(){showTip('图片加载失败')});"
+        + "window.addEventListener('resize',apply);"
+        + "stage.addEventListener('wheel',function(e){"
+        + " if(e.shiftKey||e.ctrlKey||e.metaKey){e.preventDefault();zoomAt(e.clientX,e.clientY,e.deltaY<0?1.25:0.8);}"
+        + "},{passive:false});"
+        + "view.addEventListener('dblclick',function(){"
+        + " var t=fit<1?1/fit:2;"
+        + " z=(z===t?1:t);"
+        + " apply();"
+        + "});"
+
+    // src 拼进 HTML 属性，& 和 " 需转义（dataURL 内不会出现，http 直链可能有）
+    const srcAttr = src.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>图片查看</title><style>'
+        + 'html,body{margin:0;height:100%;background:#1e1e1e;overflow:hidden}'
+        + '#stage{height:100%;overflow:auto;display:flex}'
+        // margin:auto 居中：放大溢出时内容不会被裁掉（justify-content:center 会）
+        + '#view{margin:auto;max-width:100%;max-height:100%;-webkit-user-select:none}'
+        + '#tip{position:fixed;top:8px;right:10px;font:12px/1.8 monospace;color:#ddd;'
+        + 'background:rgba(0,0,0,.5);padding:0 8px;border-radius:9px;'
+        + 'opacity:0;transition:opacity .4s;pointer-events:none}'
+        + '</style></head><body>'
+        + '<div id="stage"><img id="view" draggable="false" src="' + srcAttr + '"></div>'
+        + '<div id="tip"></div>'
+        + '<script>' + pageScript + '</script>'
+        + '</body></html>'
 
     const win = new BrowserWindow({
         width: 900,
@@ -417,8 +474,7 @@ function openImageWindow(src) {
         minWidth: 200,
         minHeight: 150,
         autoHideMenuBar: true,
-        // 图片直链在页面外打开会丢失 referer 导致部分大图 403，
-        // 挂到默认会话（与主窗口同 session）携带登录态
+        backgroundColor: '#1e1e1e',
         webPreferences: {
             session: electron.session.defaultSession,
         },
@@ -426,14 +482,7 @@ function openImageWindow(src) {
     S.imageWindows.add(win)
     win.on('closed', function () { S.imageWindows.delete(win) })
 
-    win.loadURL(src, { httpReferrer: DEFAULT_START_PAGE })
-        .then(function () {
-            // 图片在窗口里默认左上角对齐，注入样式铺满+留白更舒适
-            return win.webContents.insertCSS(
-                'html,body{margin:0;height:100%;background:#1e1e1e;display:flex;'
-                + 'align-items:center;justify-content:center;overflow:hidden;}'
-                + 'img{max-width:100%;max-height:100%;object-fit:contain;}')
-        })
+    win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
         .catch(function (e) {
             console.log("图片窗口加载失败: " + e.message)
             win.close()
@@ -444,11 +493,10 @@ function openImageWindow(src) {
 // ============================ 7. 未读角标轮询 ============================
 
 /**
- * 启动未读角标轮询（每 1.5s）：
+ * 启动未读角标轮询（每 1.5s，先清旧定时器避免页面重载后叠加）：
  * - 有未读 → 托盘图标闪烁；无未读 → 停止闪烁
  * - 未读数增加 → 兜底弹系统通知（页面 hook 可能被新版飞书绕过）
  * - 未开启水印时顺带移除飞书页面水印
- * 页面重载会再次触发 did-finish-load，先清旧定时器避免叠加
  */
 function startBadgePoll(showWarterMark) {
     if (S.badgePollTimer != null) clearInterval(S.badgePollTimer)
@@ -460,15 +508,12 @@ function startBadgePoll(showWarterMark) {
         // 飞书前端改版只换 class 名时不至于全部失配导致托盘永不闪烁
         webContents.executeJavaScript(`
             (function(){
-                // 1. 旧版角标 class
                 var legacy = document.getElementsByClassName('larkc-badge-count circle larkc-badge-normal').length;
                 if(legacy > 0) return legacy;
-                // 2. 标题里的未读数，如 "(3) 飞书"（跨版本最稳的信号）
                 var m = (document.title || '').match(/\\((\\d+)\\)/);
                 if(m) return parseInt(m[1]);
-                // 3. 通用兜底：badge 相关 class 且可见的元素里，
-                //    内容是正数（含 99+）的都算未读；隐藏元素 textContent
-                //    仍有值，必须用 offsetParent 过滤，否则会把隐藏角标当未读
+                // 兜底：可见的 badge 元素且内容为正数（含 99+）即算未读；
+                // 隐藏元素 textContent 仍有值，须用 offsetParent 过滤
                 var badges = document.querySelectorAll('[class*="badge-count"], [class*="badgeCount"]');
                 var n = 0;
                 for(var i=0;i<badges.length;i++){
@@ -521,132 +566,7 @@ function maybeNotifyNewMessage(currentUnread) {
     S.lastUnreadBadgeCount = currentUnread
 }
 
-// ============================ 8. 页面 hook ============================
-
-/**
- * 注入页面 js，两部分：
- * 1) hack html5 的 Notification 接口与 ServiceWorkerRegistration.showNotification，
- *    将通知内容转发到主进程（新版飞书可能改走 Service Worker 发通知）
- * 2) 拦截聊天图片点击（大缩略图），改由主进程弹独立查看窗口；
- *    表情包/头像（小图或 emoji/sticker/avatar 路径）不拦截，维持飞书原生行为
- */
-function injectNotificationHook() {
-    const webContents = S.mainWebContents
-    if (webContents == null) return
-
-    webContents.executeJavaScript(`
-        let ipcRenderer = null;
-        try{ipcRenderer = require('electron').ipcRenderer} catch(e) {}
-        let sendNotify = function(title, opt){
-            if(ipcRenderer == null) return false;
-            let sendMsg = JSON.stringify({ title: title, opt: opt })
-            try {
-                ipcRenderer.send("notification", sendMsg);
-                return true;
-            } catch (e) {
-                console.log("发送 ipc 消息报错", e);
-                return false;
-            }
-        }
-        let oldNotification = window.Notification;
-        // 飞书会持有 new Notification() 的返回值并调用其方法（如已读消息时
-        // close()），成功转发后返回 stub 对象而非 undefined，
-        // 否则飞书侧抛 "t.close is not a function"
-        let makeStub = function(title, opt){
-            let listeners = {}
-            let fire = function(type){
-                setTimeout(function(){
-                    let handlers = listeners[type] || []
-                    for(let i=0;i<handlers.length;i++) handlers[i]({type: type})
-                    let on = stub["on" + type]
-                    if(typeof on === 'function') on({type: type})
-                }, 0)
-            }
-            let stub = {
-                title: title,
-                body: opt && opt.body,
-                icon: opt && opt.icon,
-                tag: opt && opt.tag,
-                silent: !!(opt && opt.silent),
-                show: function(){},
-                close: function(){ fire('close') },
-                addEventListener: function(type, fn){
-                    (listeners[type] = listeners[type] || []).push(fn)
-                },
-                removeEventListener: function(type, fn){
-                    let arr = listeners[type] || []
-                    let idx = arr.indexOf(fn)
-                    if(idx >= 0) arr.splice(idx, 1)
-                },
-                dispatchEvent: function(){ return false }
-            }
-            return stub
-        }
-        let newNotification = function(title, opt){
-            console.log("hack-title:" + title);
-            console.log("hack-opt:" + JSON.stringify(opt));
-            if(!sendNotify(title, opt)) {
-                return new oldNotification(title,opt);
-            }
-            return makeStub(title, opt)
-        }
-        newNotification.requestPermission = oldNotification.requestPermission.bind(oldNotification);
-        Object.defineProperty(newNotification, 'permission', {
-            get: () => {
-                return oldNotification.permission;
-            }
-        });
-        window.Notification = newNotification;
-        if(window.ServiceWorkerRegistration && ServiceWorkerRegistration.prototype) {
-            let oldShow = ServiceWorkerRegistration.prototype.showNotification;
-            if(typeof oldShow === 'function') {
-                ServiceWorkerRegistration.prototype.showNotification = function(title, opt){
-                    console.log("hack-sw-title:" + title);
-                    console.log("hack-sw-opt:" + JSON.stringify(opt));
-                    sendNotify(title, opt);
-                    return oldShow.call(this, title, opt);
-                };
-            }
-        }
-        // ---- 聊天图片点击 → 独立查看窗口（替代飞书页面内全屏查看器）----
-        // 只拦截"图片消息"（大缩略图），表情包/头像维持飞书原生行为。
-        // 区分依据：图片消息缩略图有最小渲染尺寸（约 100px），而表情/头像
-        // 通常很小；尺寸过滤 + 链接特征双保险，避免误拦
-        if(!window.__elkImageHookInstalled) {
-            window.__elkImageHookInstalled = true;
-            var isChatImage = function(img){
-                // 表情/头像的常见路径特征，命中则不拦截
-                var s = (img.currentSrc || img.src || '').toLowerCase();
-                if(s.indexOf('/emoji/') >= 0 || s.indexOf('/sticker') >= 0
-                    || s.indexOf('/avatar') >= 0) return false;
-                // 图片消息缩略图足够大（容差取小值，适配小窗截图）
-                var w = img.naturalWidth || img.width || 0;
-                var h = img.naturalHeight || img.height || 0;
-                return w >= 100 && h >= 100;
-            }
-            document.addEventListener('click', function(ev){
-                var node = ev.target;
-                while(node && node !== document.body) {
-                    if(node.tagName === 'IMG') {
-                        if(isChatImage(node)) {
-                            var src = node.currentSrc || node.src || '';
-                            ev.stopPropagation();
-                            ev.preventDefault();
-                            try {
-                                ipcRenderer.send("open-image-window", src);
-                            } catch (e) {
-                                console.log("图片窗口 IPC 失败", e);
-                            }
-                        }
-                        return; // 命中 img 即结束（拦或放行都不再向上找）
-                    }
-                    node = node.parentNode;
-                }
-            }, true);
-        }`);
-}
-
-// ============================ 9. 系统通知 ============================
+// ============================ 8. 系统通知 ============================
 
 /**
  * 主进程弹系统通知的统一入口。
@@ -659,7 +579,7 @@ function showSystemNotify(opts) {
         title: opts.title,
         subtitle: opts.title,
         body: opts.body,
-        icon: electron.nativeImage.createFromPath(appConf.dock32),
+        icon: dock32Icon,
     })
 
     // 持有通知对象直到展示结束，防止 GC 导致 Windows toast 不显示/事件丢失
@@ -681,25 +601,23 @@ function showSystemNotify(opts) {
  */
 function showPageToast(text) {
     if (!mainAlive() || S.mainWebContents == null) return
-    try {
-        S.mainWebContents.executeJavaScript(`
-            (function(){
-                var old = document.getElementById('elk-update-toast');
-                if(old) old.remove();
-                var toast = document.createElement('div');
-                toast.id = 'elk-update-toast';
-                toast.textContent = ${JSON.stringify(text)};
-                toast.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;'
-                    + 'background:rgba(33,33,33,0.92);color:#fff;padding:12px 20px;border-radius:8px;'
-                    + 'font-size:14px;box-shadow:0 4px 16px rgba(0,0,0,0.3);'
-                    + 'max-width:360px;line-height:1.5;';
-                document.body.appendChild(toast);
-                setTimeout(function(){ toast.remove(); }, 3500);
-            })();
-        `)
-    } catch (e) {
-        console.log("主窗口 toast 注入失败:", e.message)
-    }
+    S.mainWebContents.executeJavaScript(`
+        (function(){
+            var old = document.getElementById('elk-update-toast');
+            if(old) old.remove();
+            var toast = document.createElement('div');
+            toast.id = 'elk-update-toast';
+            toast.textContent = ${JSON.stringify(text)};
+            toast.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;'
+                + 'background:rgba(33,33,33,0.92);color:#fff;padding:12px 20px;border-radius:8px;'
+                + 'font-size:14px;box-shadow:0 4px 16px rgba(0,0,0,0.3);'
+                + 'max-width:360px;line-height:1.5;';
+            document.body.appendChild(toast);
+            setTimeout(function(){ toast.remove(); }, 3500);
+        })();
+    `).catch(function () {
+        // 页面导航/销毁瞬间注入失败可忽略
+    })
 }
 
 // 把更新检查结果转为 toast 文案并展示
@@ -720,22 +638,20 @@ function showUpdateResultToast(result) {
 function openChatByChannelId(channelId) {
     if (!mainAlive()) return
     S.mainWindow.show()
-    try {
-        S.mainWebContents.executeJavaScript(`
-            var doms = document.getElementsByTagName("div");
-            for(let i =0;i<doms.length;i++){
-                if(doms[i].getAttribute("data-feed-id") == '${channelId}') {
-                    doms[i].click();
-                    break;
-                }
+    S.mainWebContents.executeJavaScript(`
+        var doms = document.getElementsByTagName("div");
+        for(let i =0;i<doms.length;i++){
+            if(doms[i].getAttribute("data-feed-id") == '${channelId}') {
+                doms[i].click();
+                break;
             }
-        `)
-    } catch (e) {
-        console.log(e)
-    }
+        }
+    `).catch(function () {
+        // 页面导航/销毁瞬间注入失败可忽略
+    })
 }
 
-// ============================ 10. 托盘 ============================
+// ============================ 9. 托盘 ============================
 
 function startTrayBling() {
     // 用户正看着主窗口时不闪烁
@@ -808,7 +724,7 @@ function initTray() {
     })
 }
 
-// ============================ 11. 设置窗口 ============================
+// ============================ 10. 设置窗口 ============================
 
 /**
  * 打开设置窗口（单例：已打开则置顶聚焦，不再重复开窗）
@@ -852,7 +768,7 @@ function openSettingsWindow(page) {
     })
 }
 
-// ============================ 12. IPC ============================
+// ============================ 11. IPC ============================
 
 function registerIpcHandlers() {
     // 页面通知 hook 转发来的消息（title 是聊天对象名，opt.body 是消息内容）
@@ -886,7 +802,6 @@ function registerIpcHandlers() {
     // 设置页发起的检查更新请求
     // 结果仅在主窗口右下角 toast 展示（设置页只保留"正在检查更新"提示）
     ipcMain.on("check-update", (event) => {
-        console.log("收到设置页检查更新请求")
         updateChecker.check(true, function () {}, showUpdateResultToast)
         event.returnValue = 'ok'
     })
@@ -894,7 +809,6 @@ function registerIpcHandlers() {
     // 设置页"调试模式"开关：打开/关闭主窗口开发者工具
     // 状态不持久化，以主窗口 webContents 的真实状态为准
     ipcMain.on("toggle-devtools", (event, open) => {
-        console.log("收到开发者工具开关请求: " + open)
         if (mainAlive()) {
             if (open === true) {
                 S.mainWebContents.openDevTools()
@@ -923,7 +837,7 @@ function registerIpcHandlers() {
     })
 }
 
-// ============================ 13. App 生命周期 ============================
+// ============================ 12. App 生命周期 ============================
 
 // ----- App 级初始化（须在 ready 前执行的部分）-----
 

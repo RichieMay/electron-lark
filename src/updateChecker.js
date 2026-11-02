@@ -5,23 +5,37 @@ const Notification = electron.Notification;
 
 const appConf = require("./configuration")
 
-// 状态文件落 userData（安装目录不可写，不能用相对路径）
-const updateStateFile = path.join(electron.app.getPath('userData'), 'updateCheck.json')
+// 统一构造带图标的系统通知
+function notify(title, body){
+    const n = new Notification({
+        title: title,
+        subtitle: title,
+        body: body,
+        icon: electron.nativeImage.createFromPath(appConf.dock32),
+    });
+    n.show();
+    return n;
+}
+
+// 状态文件落 userData（安装目录不可写，不能用相对路径）。
+// 注意不能在模块顶层取 path：main.js 在 app ready 之前 require 本模块，
+// 早期时序下 app.getPath 可能不可用，首次用到时再解析
+function updateStateFile() {
+    return path.join(electron.app.getPath('userData'), 'updateCheck.json')
+}
 
 let updateCheckJson;
 
 function getConfigJson(callback){
     if(appStoreFs == null) return
-    appStoreFs.readFile(updateStateFile,'utf-8',function(err,data){
+    appStoreFs.readFile(updateStateFile(),'utf-8',function(err,data){
         if(err){
-            console.log(err)
-            console.log("读取更新状态文件失败（首次启动属正常）")
+            // 首次启动无状态文件属正常，用初始值
             updateCheckJson = {
                 lastCheckUpdateTimeStamp: 0
             }
         }
         else{
-            console.log("read config json:" + data);
             updateCheckJson = JSON.parse(data);
         }
         callback()
@@ -29,40 +43,22 @@ function getConfigJson(callback){
 }
 
 function saveConfig(){
-    if (appStoreFs == null) {
-        console.log("fs 载入失败")
-        return;
-    }
-    appStoreFs.writeFile(updateStateFile,JSON.stringify(updateCheckJson, null, "  "),function (err) {
-        if(err){
-            console.log(err);
-        }else{
-            console.log("更新配置保存成功")
-        }
+    if (appStoreFs == null) return;
+    appStoreFs.writeFile(updateStateFile(),JSON.stringify(updateCheckJson, null, "  "),function (err) {
+        if(err) console.log("更新状态保存失败:", err);
     })
 }
 
 function checkUpdateInAppStart(){
-    // localStorage.
-
     function check(){
-        if(updateCheckJson == null){
-            console.log("updateCheckJson 为 null")
-            return
-        } else {
-            console.log(updateCheckJson)
-        };
+        if(updateCheckJson == null) return
 
-
-        let unixTimeStamp = Math.floor(new Date().getTime() / 1000);
+        const unixTimeStamp = Math.floor(new Date().getTime() / 1000);
         if(updateCheckJson.lastCheckUpdateTimeStamp == null){
             updateCheckJson.lastCheckUpdateTimeStamp = 0;
-        } else {
-            console.log("上次检查时间:" + updateCheckJson.lastCheckUpdateTimeStamp);
         }
 
         // 每次启动都静默检查（静默模式：无新版/失败都不打扰，仅发现新版本时通知）
-        console.log("启动检查更新")
         checkUpdate(false, function(){
             updateCheckJson.lastCheckUpdateTimeStamp = unixTimeStamp;
             saveConfig();
@@ -74,7 +70,6 @@ function checkUpdateInAppStart(){
     } else {
         check();
     }
-
 }
 
 // ------------------------ 定时检查 --------------------------------
@@ -94,11 +89,7 @@ function startDailyUpdateCheck(){
         if(next.getTime() <= now.getTime()){
             next.setDate(next.getDate() + 1);
         }
-        const delay = next.getTime() - now.getTime();
-        console.log("下次定时检查更新: " + next.toLocaleString()
-            + " (约 " + Math.round(delay / 60000) + " 分钟后)");
         dailyCheckTimer = setTimeout(function(){
-            console.log("定时检查更新")
             checkUpdate(false, function(){
                 if(updateCheckJson != null){
                     updateCheckJson.lastCheckUpdateTimeStamp = Math.floor(new Date().getTime() / 1000);
@@ -107,7 +98,7 @@ function startDailyUpdateCheck(){
             });
             // 检查完排下一天
             scheduleNext();
-        }, delay);
+        }, next.getTime() - now.getTime());
     }
 
     scheduleNext();
@@ -126,14 +117,7 @@ function checkUpdate(showCheckNotify, successCb, resultCb){
     function notifyCheckFail(reason){
         console.log("检查更新失败: " + reason)
         resultCb({type: 'fail', message: reason})
-        if(showCheckNotify !== undefined && showCheckNotify) {
-            new Notification({
-                title: "检查更新失败",
-                subtitle : "检查更新失败",
-                body: reason,
-                icon: electron.nativeImage.createFromPath(appConf.dock32),
-            }).show();
-        }
+        if(showCheckNotify) notify("检查更新失败", reason);
     }
 
     // 用 electron.net 发起请求：走 Chromium 网络栈，自动使用系统代理，
@@ -155,7 +139,6 @@ function checkUpdate(showCheckNotify, successCb, resultCb){
     }, 15000);
 
     request.on('response', (response) => {
-        console.log('request github api for check update, status code :' + response.statusCode);
         response.on('data', (data) => {
             resJsonStr += String(data);
         });
@@ -169,7 +152,6 @@ function checkUpdate(showCheckNotify, successCb, resultCb){
             try{
                 resJson = JSON.parse(resJsonStr);
             } catch(e){
-                console.log("resJsonStr 校验错误")
                 notifyCheckFail("Github API 返回数据解析失败");
                 return
             }
@@ -189,38 +171,21 @@ function checkUpdate(showCheckNotify, successCb, resultCb){
                 .replace("v","");
 
             // 只要最新版本和当前版本不一样，就提示更新
-            let packageVersion = require(path.join(__dirname, './../package.json'))
+            const packageVersion = require(path.join(__dirname, './../package.json'))
                 .version
                 .trim()
                 .toLocaleLowerCase().replace("v", "");
-            console.log("当前版本号:", packageVersion);
-            console.log("最新版本号:", newVersion);
 
             if(packageVersion != newVersion) {
                 resultCb({type: 'newer', message: "发现新版本 " + newVersion + "，可前往 GitHub Release 页下载"})
-                let updateNotify = new Notification({
-                    title: "发现新版本",
-                    subtitle: "发现新版本",
-                    body: "electron-lark 已发现新版本，请前往 github release 页下载",
-                    icon: electron.nativeImage.createFromPath(appConf.dock32),
-                });
-
+                const updateNotify = notify("发现新版本", "发现新版本，请前往 GitHub Release 页下载");
                 updateNotify.addListener('click', function(){
-                    console.log("open github for download release");
                     electron.shell.openExternal('https://github.com/RichieMay/electron-lark/releases')
                 });
-                updateNotify.show();
 
             } else {
                 resultCb({type: 'latest', message: "当前已是最新版本"})
-                if(showCheckNotify !== undefined && showCheckNotify) {
-                    new Notification({
-                        title: "当前已是最新版本",
-                        subtitle: "当前已是最新版本",
-                        body: "当前 elecron-lark 版本已是最新版本",
-                        icon: electron.nativeImage.createFromPath(appConf.dock32),
-                    }).show();
-                }
+                if(showCheckNotify) notify("当前已是最新版本", "当前已是最新版本");
             }
 
             successCb();
@@ -231,8 +196,6 @@ function checkUpdate(showCheckNotify, successCb, resultCb){
         if(finished) return;
         finished = true;
         clearTimeout(timeoutTimer);
-        console.log("fail in request github api")
-        console.error(e);
         notifyCheckFail(e.message);
     });
 

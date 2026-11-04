@@ -78,6 +78,12 @@ const S = {
 
     lastHookNotifyTime: 0,   // 页面 hook 通知最近触发时间（兜底通知去重用）
 
+    // webRequest 捕获的媒体流地址（最近在前，仅内存环形缓冲），
+    // "保存视频"时若 <video> 上拿不到直链（blob:/MSE）从这里兜底
+    mediaUrls: [],
+
+    videoSaving: false,       // "保存视频"进行中（防连点重复下载）
+
     activeNotifications: new Set(), // 存活中的系统通知（防 GC 导致 toast 丢失/事件失效）
 };
 
@@ -193,7 +199,34 @@ function initSession(config) {
     })
 
     initProxy(ses, config)
+    initMediaCapture(ses)
     initDownload(ses)
+}
+
+/**
+ * 记录最近的媒体流请求地址（内存环形缓冲，仅飞书域名，不拦截请求）：
+ * "保存视频"时若 <video> 上拿不到 https 直链（blob:/MSE），从这里兜底。
+ * 须用 onCompleted（单参数监听器，纯旁路）——onBeforeRequest 是阻塞式
+ * API，漏调 callback 会把飞书全部请求挂死（白屏）。
+ */
+function initMediaCapture(ses) {
+    const MEDIA_URL_RE = /\.mp4|video|media|stream/i
+    ses.webRequest.onCompleted(
+        { urls: [
+            '*://*.feishu.cn/*', '*://feishu.cn/*',
+            '*://*.feishucdn.com/*',
+            '*://*.larksuite.com/*', '*://larksuite.com/*',
+            '*://*.larksuitencdn.com/*',
+        ] },
+        (details) => {
+            const t = details.resourceType
+            if (t === 'media'
+                || ((t === 'xhr' || t === 'fetch') && MEDIA_URL_RE.test(details.url))) {
+                S.mediaUrls.unshift(details.url)
+                if (S.mediaUrls.length > 50) S.mediaUrls.length = 50
+            }
+        }
+    )
 }
 
 /**
@@ -273,6 +306,119 @@ function initDownload(ses) {
             }
         })
     })
+}
+
+/**
+ * "保存到本地"（视频消息右键菜单注入项）：
+ * 官方下载被服务端权限拦截（视频可播放），这里用默认会话（自带 cookie +
+ * 页面同款 UA）重拉播放器使用的流地址。落盘/通知与官方下载一致：
+ * 下载目录、同名加序号、完成通知点击打开所在文件夹。
+ *   src:     preload 取到的流地址（https 直链或空，blob: 主进程不可用）
+ *   pageUrl: 来源页面地址，作 referrer 防签名校验失败
+ *   name:    preload 从消息 fiber 读到的原始文件名（content.mediaContent.name），
+ *            探测不到响应文件名时兜底
+ */
+async function saveVideoAs(src, pageUrl, name) {
+    if (S.videoSaving) return   // 防连点重复下载
+    S.videoSaving = true
+    try {
+        await doSaveVideoAs(src, pageUrl, name)
+    } catch (e) {
+        console.log("save-video 异常: " + (e && e.message))
+    } finally {
+        S.videoSaving = false
+    }
+}
+
+async function doSaveVideoAs(src, pageUrl, name) {
+    const ses = electron.session.defaultSession
+
+    // blob: 主进程解析不了，回退抓包缓冲里最近一条 https 直链
+    let target = ''
+    if (typeof src === 'string' && src.startsWith('https')) target = src
+    if (target === '') {
+        const hit = S.mediaUrls.find(u => u.startsWith('https'))
+        if (hit) target = hit
+    }
+    if (target === '') {
+        showSystemNotify({ title: "无法保存视频", body: "没有可用的视频流地址，请重新播放后重试" })
+        return
+    }
+
+    // 文件名优先级：响应 Content-Disposition > URL 尾段 > preload 从消息
+    // fiber 读到的原始名 > 时间戳兜底。Range:0 只为读响应头（CDN 常见对
+    // 探测请求回 400，读不到不影响下载本体）
+    let filename = ''
+    try {
+        const head = await ses.fetch(target, {
+            headers: { 'Range': 'bytes=0-0' },
+            referrer: pageUrl,
+        })
+        const cd = head.headers.get('content-disposition') || ''
+        const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)
+        if (m) filename = decodeURIComponent(m[1])
+        if (!filename) {
+            const last = new URL(target).pathname.split('/').filter(Boolean).pop() || ''
+            if (/\.[a-z0-9]{2,5}$/i.test(last)) filename = decodeURIComponent(last)
+        }
+        try { head.body && head.body.cancel() } catch (_) { }
+    } catch (e) {
+        console.log('elk 探测视频文件名失败: ' + e.message)
+    }
+    if (!filename && typeof name === 'string' && /\.[a-z0-9]{2,5}$/i.test(name)) {
+        filename = name.replace(/[\\/:*?"<>|]/g, '_')   // 去掉跨平台非法字符
+    }
+    if (!filename) filename = 'video-' + Date.now() + '.mp4'
+
+    const saveDir = app.getPath('downloads')
+    let savePath = path.join(saveDir, filename)
+    {
+        const ext = path.extname(filename)
+        const base = filename.slice(0, filename.length - ext.length)
+        let n = 1
+        while (fs.existsSync(savePath)) {
+            savePath = path.join(saveDir, base + ' (' + n + ')' + ext)
+            n++
+        }
+    }
+    console.log('elk save-video 落盘: ' + savePath)
+
+    const fail = function (msg) {
+        console.log('elk save-video 失败: ' + msg)
+        showSystemNotify({ title: "下载失败", body: filename + " (" + msg + ")" })
+        try { fs.unlinkSync(savePath) } catch (_) { }
+    }
+    try {
+        const resp = await ses.fetch(target, { referrer: pageUrl })
+        if (!resp.ok) { fail("HTTP " + resp.status); return }
+        // WHATWG 流 → fs 流搬运（带背压），大视频不整载内存
+        const reader = resp.body.getReader()
+        const out = fs.createWriteStream(savePath)
+        const outClosed = new Promise(function (resolve, reject) {
+            out.on('error', reject)
+            out.on('close', function () { resolve() })
+        })
+        try {
+            for (; ;) {
+                const { done, value } = await reader.read()
+                if (done) break
+                if (!out.write(value)) {
+                    await new Promise(function (resolve) { out.once('drain', resolve) })
+                }
+            }
+            out.end()
+            await outClosed
+        } finally {
+            try { out.destroy() } catch (_) { }
+        }
+        showSystemNotify({
+            title: "下载完成",
+            body: filename,
+            onClick: function () { shell.showItemInFolder(savePath) },
+        })
+    } catch (e) {
+        fail(e.message)
+    }
 }
 
 // ============================ 6. 主窗口（主窗口 + 图片查看窗口） ============================
@@ -571,9 +717,14 @@ function maybeNotifyNewMessage(currentUnread) {
 /**
  * 主进程弹系统通知的统一入口。
  * opts: { title, body, onClick }
+ * 系统通知不可用（如 WSL 无通知服务）时退回主窗口右下角 toast，
+ * 保证下载完成等结果始终可见（toast 不支持点击回调）。
  */
 function showSystemNotify(opts) {
-    if (!Notification.isSupported()) return null
+    if (!Notification.isSupported()) {
+        showPageToast((opts.title || '') + (opts.body ? '\n' + opts.body : ''))
+        return null
+    }
 
     const n = new Notification({
         title: opts.title,
@@ -597,27 +748,12 @@ function showSystemNotify(opts) {
 
 /**
  * 在主窗口(飞书页面)右下角弹纯文本 toast（更新结果等）。
- * 页面环境无 mdui 可用，注入轻量自绘样式；3.5 秒后自动消失
+ * 经 preload 的 IPC 通道渲染（executeJavaScript 在飞书 SSE 场景下
+ * 时序不可靠，见 preload 头注释）；3.5 秒后自动消失
  */
 function showPageToast(text) {
     if (!mainAlive() || S.mainWebContents == null) return
-    S.mainWebContents.executeJavaScript(`
-        (function(){
-            var old = document.getElementById('elk-update-toast');
-            if(old) old.remove();
-            var toast = document.createElement('div');
-            toast.id = 'elk-update-toast';
-            toast.textContent = ${JSON.stringify(text)};
-            toast.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;'
-                + 'background:rgba(33,33,33,0.92);color:#fff;padding:12px 20px;border-radius:8px;'
-                + 'font-size:14px;box-shadow:0 4px 16px rgba(0,0,0,0.3);'
-                + 'max-width:360px;line-height:1.5;';
-            document.body.appendChild(toast);
-            setTimeout(function(){ toast.remove(); }, 3500);
-        })();
-    `).catch(function () {
-        // 页面导航/销毁瞬间注入失败可忽略
-    })
+    S.mainWebContents.send('page-toast', text)
 }
 
 // 把更新检查结果转为 toast 文案并展示
@@ -834,6 +970,16 @@ function registerIpcHandlers() {
     // 页面 hook：聊天图片点击 → 独立可缩放查看窗口
     ipcMain.on("open-image-window", (event, src) => {
         openImageWindow(src)
+    })
+
+    // 页面 hook：视频消息右键"保存到本地" → 带登录态重拉流，按官方下载行为落盘
+    ipcMain.on("save-video", (event, msg) => {
+        try {
+            const args = JSON.parse(msg)
+            saveVideoAs(args.src, args.pageUrl, args.name)
+        } catch (e) {
+            console.log("save-video 解析失败: " + e.message)
+        }
     })
 }
 

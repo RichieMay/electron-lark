@@ -62,6 +62,7 @@ const S = {
     mainWebContents: null,   // 主窗口 webContents 快捷引用（可为 null）
     settingsWindow: null,    // 设置窗口（单例）
     imageWindows: new Set(), // 聊天图片独立查看窗口（防 GC 持有，关窗自动移除）
+    imageWindowByKey: new Map(), // originKey → 活着的查看窗口（同图重复点 → 聚焦）
     tray: null,
     onFocus: false,          // 是否有应用窗口处于焦点
     isQuitting: false,       // 真正退出中（此时不再拦截主窗口 close）
@@ -421,6 +422,47 @@ async function doSaveVideoAs(src, pageUrl, name) {
     }
 }
 
+/**
+ * 图片消息右键"保存到本地"：preload 抓到的原图 dataURL 直接落盘。
+ * 落盘/通知与视频保存、官方下载一致：下载目录、同名加序号、完成通知
+ * 点击打开所在文件夹
+ */
+function saveImageAs(dataUrl, name, key) {
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return
+    const m = dataUrl.match(/^data:image\/(png|jpe?g|webp|gif|bmp|avif);base64,(.*)$/s)
+    if (!m) { console.log('save-image: 未知图片格式'); return }
+    const ext = m[1] === 'jpeg' ? 'jpg' : m[1]
+    // 命名链：消息原文件名（fiber content.name，image 消息才有）→ 图片
+    // key 尾段（post 内嵌图消息数据里无文件名，key 对同图稳定可辨识）
+    // → 时间戳。扩展名由 dataURL MIME 定，key 尾段不含扩展名故补 ext
+    const clean = (s) => s.trim().replace(/\.(png|jpe?g|webp|gif|bmp|avif)$/i, '').replace(/[\\/:*?"<>|]/g, '_')
+    const rawName = (typeof name === 'string' && name.trim()) ? clean(name) : ''
+    const rawKey = (typeof key === 'string' && key.trim()) ? clean(key.split('_').pop()) : ''
+    const base = rawName || rawKey || 'image-' + Date.now()
+    const filename = base + '.' + ext
+    const saveDir = app.getPath('downloads')
+    let savePath = path.join(saveDir, filename)
+    {
+        let n = 1
+        while (fs.existsSync(savePath)) {
+            savePath = path.join(saveDir, base + ' (' + n + ').' + ext)
+            n++
+        }
+    }
+    try {
+        fs.writeFileSync(savePath, Buffer.from(m[2], 'base64'))
+        console.log('elk save-image 落盘: ' + savePath)
+        showSystemNotify({
+            title: "下载完成",
+            body: filename,
+            onClick: function () { shell.showItemInFolder(savePath) },
+        })
+    } catch (e) {
+        console.log('elk save-image 失败: ' + e.message)
+        showSystemNotify({ title: "下载失败", body: filename })
+    }
+}
+
 // ============================ 6. 主窗口（主窗口 + 图片查看窗口） ============================
 
 function createMainWindow(config) {
@@ -548,14 +590,24 @@ function createMainWindow(config) {
  * 图片包一层 HTML 由页面脚本接管布局（Chromium 原生图片文档的适应尺寸
  * 在加载时固定，不跟随窗口变化）：
  * - 居中自适应窗口大小
- * - Shift/Ctrl+滚轮以鼠标位置为中心缩放（0.1~10 倍），普通滚轮平移
+ * - Shift/Ctrl+滚轮以鼠标位置为中心缩放（0.1~5 倍），普通滚轮平移
  * - 双击切换"适应窗口 / 像素原大"，右上角短暂显示缩放百分比
- * src 为 preload 转换的 dataURL 或 http 直链（挂默认会话带登录态）
+ * src 为 preload 转换的原图 dataURL。key 为消息 originKey（同图恒定）：
+ * 同图重复点击不重复开窗、聚焦已有窗口；关窗解绑，之后再点可重开
  */
-function openImageWindow(src) {
-    if (typeof src !== 'string' || src === '') return
-    const isDataUrl = src.startsWith('data:')
-    if (!isDataUrl && !/^https?:/i.test(src)) return
+function openImageWindow(src, key) {
+    if (typeof src !== 'string' || !src.startsWith('data:')) return
+
+    // 同图已有活窗 → 提到前台即可
+    if (key && S.imageWindowByKey.has(key)) {
+        const exist = S.imageWindowByKey.get(key)
+        if (exist && !exist.isDestroyed()) {
+            if (exist.isMinimized()) exist.restore()
+            exist.focus()
+            return exist
+        }
+        S.imageWindowByKey.delete(key)
+    }
 
     // 图片查看页脚本：接管布局后 max-width/max-height 由 JS 显式尺寸取代，
     // 缩放锚点取鼠标位置（未放大时滚动量为 0，公式自然退化为居中缩放）
@@ -574,7 +626,7 @@ function openImageWindow(src) {
         + "function zoomAt(x,y,f){"
         + " if(!ready)return;"
         + " var ow=view.width,oh=view.height;"
-        + " z=Math.min(10,Math.max(0.1,z*f));"
+        + " z=Math.min(5,Math.max(0.1,z*f));"
         + " apply();"
         + " if(ow>0&&oh>0){"
         + "  stage.scrollLeft=(stage.scrollLeft+x)*(view.width/ow)-x;"
@@ -598,7 +650,7 @@ function openImageWindow(src) {
         + " apply();"
         + "});"
 
-    // src 拼进 HTML 属性，& 和 " 需转义（dataURL 内不会出现，http 直链可能有）
+    // src 拼进 HTML 属性（防御性转义，dataURL 内不会出现这两个字符）
     const srcAttr = src.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
     const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>图片查看</title><style>'
         + 'html,body{margin:0;height:100%;background:#1e1e1e;overflow:hidden}'
@@ -626,13 +678,68 @@ function openImageWindow(src) {
         },
     })
     S.imageWindows.add(win)
-    win.on('closed', function () { S.imageWindows.delete(win) })
+    if (key) S.imageWindowByKey.set(key, win)
+    win.on('closed', function () {
+        S.imageWindows.delete(win)
+        if (key && S.imageWindowByKey.get(key) === win) S.imageWindowByKey.delete(key)
+    })
+    // 右键菜单只留"复制图片"（主进程从 dataURL 解码 PNG 写剪贴板；
+    // copyImageAt 依赖渲染进程按坐标取图、大 dataURL 下不稳）。Electron 45
+    // 剪贴板为 W3C 风格：writeImage 已删，须 ClipboardItem+Blob
+    win.webContents.on('context-menu', function (_e, params) {
+        if (params.mediaType !== 'image') return
+        electron.Menu.buildFromTemplate([{
+            label: '复制图片',
+            click: function () {
+                const img = electron.nativeImage.createFromDataURL(src)
+                if (img.isEmpty()) {
+                    win.webContents.executeJavaScript('showTip("复制失败")').catch(function () { })
+                    return
+                }
+                const blob = new Blob([img.toPNG()], { type: 'image/png' })
+                electron.clipboard.write([new electron.ClipboardItem({ 'image/png': blob })])
+                    .then(function () {
+                        win.webContents.executeJavaScript('showTip("已复制")').catch(function () { })
+                    })
+                    .catch(function () {
+                        win.webContents.executeJavaScript('showTip("复制失败")').catch(function () { })
+                    })
+            },
+        }]).popup({ window: win })
+    })
 
-    win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
-        .catch(function (e) {
-            console.log("图片窗口加载失败: " + e.message)
-            win.close()
-        })
+    // 大图 base64 后可能超 data: URL 顶层导航 2MB 上限（Chromium 限制，
+    // 超限 loadURL 拒绝 → 窗口空闪退）。统一走临时 HTML 文件：文件名用
+    // pid+key 哈希（同图同文件，天然防堆积；无 key 用内容哈希），加载
+    // 完成（did-finish-load，文档已在渲染进程内存）即删，不等关窗
+    const tmpDir = path.join(app.getPath('temp'), 'elk-imageview-' + process.pid)
+    let tmpFile = null
+    try {
+        fs.mkdirSync(tmpDir, { recursive: true })
+        let name = key || src
+        if (name.length > 64) {
+            name = require('crypto').createHash('md5').update(name).digest('hex')
+        }
+        tmpFile = path.join(tmpDir, 'img-' + name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) + '.html')
+        fs.writeFileSync(tmpFile, html)
+        const file = tmpFile
+        const cleanup = () => { try { fs.rmSync(file, { force: true }) } catch (e) { } }
+        win.once('closed', cleanup)   // 加载失败/未完成就关窗的兜底
+        win.loadFile(file)
+            .then(() => {
+                cleanup()
+                win.removeListener('closed', cleanup)
+            })
+            .catch(function (e) {
+                console.log("图片窗口加载失败: " + e.message)
+                cleanup()
+                win.close()
+            })
+    } catch (e) {
+        console.log("图片窗口临时文件失败: " + e.message)
+        if (tmpFile) { try { fs.rmSync(tmpFile, { force: true }) } catch (e2) { } }
+        win.close()
+    }
     return win
 }
 
@@ -967,9 +1074,20 @@ function registerIpcHandlers() {
         }
     })
 
-    // 页面 hook：聊天图片点击 → 独立可缩放查看窗口
-    ipcMain.on("open-image-window", (event, src) => {
-        openImageWindow(src)
+    // 页面 hook：聊天图片点击 → 独立可缩放查看窗口（同图去重聚焦）
+    ipcMain.on("open-image-window", (event, payload) => {
+        const args = (payload && typeof payload === 'object') ? payload : { src: payload }
+        openImageWindow(args.src, args.key)
+    })
+
+    // 页面 hook：图片消息右键"保存到本地" → 原图 dataURL 直接落盘
+    ipcMain.on("save-image", (event, msg) => {
+        try {
+            const args = JSON.parse(msg)
+            saveImageAs(args.src, args.name, args.key)
+        } catch (e) {
+            console.log("save-image 解析失败: " + e.message)
+        }
     })
 
     // 页面 hook：视频消息右键"保存到本地" → 带登录态重拉流，按官方下载行为落盘
@@ -1042,6 +1160,8 @@ import('electron-context-menu').then(contextMenu => {
             copyImageAddress: '复制图片地址',
             saveImageAs: '图片另存为',
         },
+        // 图片查看窗口有自己的"只留复制图片"菜单，全局菜单跳过它
+        shouldShowMenu: (_event, params) => !params.pageURL.startsWith('file:'),
     });
 }).catch(err => console.error("electron-context-menu 加载失败:", err));
 

@@ -1,4 +1,4 @@
-// 主窗口 preload：页面 hook 宿主（通知转发 + 图片点击拦截 + 视频右键另存）。
+// 主窗口 preload：页面 hook 宿主（通知转发 + 图片独立查看 + 视频右键另存）。
 // preload 在每个新文档创建时、页面脚本运行前自动执行，天然覆盖所有
 // 导航与重定向——executeJavaScript 注入在飞书（SSE 挂起 + 登录重定向）
 // 下时序不可靠，不可用。
@@ -99,88 +99,128 @@
         } catch (e) { /* 页面卸载瞬间可忽略 */ }
     });
 
-    // ---------- 聊天图片点击 → 独立查看窗口 ----------
-    // 聊天图片 IMG 的父链含 chat-image/image-message/messenger-image 容器；
-    // 表情/头像 URL 含 emoji/sticker/avatar，放行维持飞书原生行为。
-    // 大图 src 是 blob:（仅本渲染进程可访问），命中后经 canvas 转成
-    // dataURL 再交主进程弹独立窗口
-    var imgSrcOf = function (img) {
-        return (img.currentSrc || img.src || '');
+    // ---------- 聊天图片 → 独立查看窗口 / 右键保存 ----------
+    // 气泡是 _MIDDLE 半分辨率、原图是 CDN 密文（解密在飞书 worklet 内），
+    // 只有官方查看器能拿到全分辨率 blob。官方查看器容器被常驻 style 压成
+    // display:none（img 照常解码）；专职容器 #__lark-web-images-container__
+    // 每次查看图片时更新内容，其 img 自带 data-origin-key（同图恒定）与
+    // data-origin-url（解密就绪才为 blob:）。observer 盯这个容器：抓到
+    // 就绪原图转 dataURL，按 elkSaveImageKey 路由——匹配（右键保存所点
+    // 图）→ 存盘，否则弹独立窗口（同图去重在主进程按 key 做）；两路
+    // 完成后代点 .viewer-close 关掉被隐藏的官方查看器
+    var elkHideViewer = function () {
+        if (document.getElementById('elk-viewer-hide')) return;
+        var st = document.createElement('style');
+        st.id = 'elk-viewer-hide';
+        st.textContent = '.viewer-container.viewer-backdrop{display:none !important}';
+        (document.head || document.documentElement).appendChild(st);
     };
-    var isChatImage = function (img) {
-        // 祖先链含聊天图片容器特征 → 图片消息
-        var n = img.parentNode;
-        while (n && n !== document.body) {
-            var c = typeof n.className === 'string' ? n.className : '';
-            if (c.indexOf('chat-image') >= 0 || c.indexOf('image-message') >= 0
-                || c.indexOf('messenger-image') >= 0) return true;
-            n = n.parentNode;
-        }
-        return false;
+    // blob → dataURL（FileReader 保留原始编码，JPEG 不膨胀成 PNG）
+    var blobToDataUrl = function (blobUrl, cb) {
+        fetch(blobUrl).then(function (r) { return r.blob(); }).then(function (b) {
+            var fr = new FileReader();
+            fr.onload = function () { cb(fr.result); };
+            fr.onerror = function () { cb(null); };
+            fr.readAsDataURL(b);
+        }).catch(function () { cb(null); });
     };
-    var isExemptImage = function (img) {
-        var s = imgSrcOf(img).toLowerCase();
-        if (s.indexOf('emoji') >= 0 || s.indexOf('sticker') >= 0
-            || s.indexOf('avatar') >= 0) return true;
-        return false;
-    };
-    // 事件 target 向上找 IMG；找不到则取命中点下所有元素里的第一个 IMG
-    var findImg = function (ev) {
-        var node = ev.target;
-        while (node && node !== document.body) {
-            if (node.tagName === 'IMG') return node;
-            node = node.parentNode;
-        }
-        var stack = document.elementsFromPoint(ev.clientX, ev.clientY) || [];
-        for (var i = 0; i < stack.length; i++) {
-            if (stack[i].tagName === 'IMG') return stack[i];
-        }
-        return null;
-    };
-    // 图片 → dataURL；blob/http 图在页面内转换，独立窗口可直接显示
-    var toDataUrl = function (img, cb) {
-        var src = imgSrcOf(img);
-        if (src.indexOf('data:') === 0) { cb(src); return }
+    var sendImageWindow = function (dataUrl, key) {
         try {
-            var c = document.createElement('canvas');
-            c.width = img.naturalWidth || img.width;
-            c.height = img.naturalHeight || img.height;
-            if (c.width === 0 || c.height === 0) { cb(src); return }
-            c.getContext('2d').drawImage(img, 0, 0);
-            cb(c.toDataURL('image/png'));
+            ipcRenderer.send('open-image-window', { src: dataUrl, key: key || '' });
         } catch (e) {
-            // canvas 被污染等异常时退回原始地址（http 图仍可直开）
-            console.log('elk canvas 转换失败: ' + e.message);
-            cb(src);
+            console.log('图片窗口 IPC 失败', e);
         }
     };
-    document.addEventListener('click', function (ev) {
-        var img = findImg(ev);
-        if (img == null) return               // 与图片无关，放行
-        if (!isChatImage(img)) return         // 非聊天图片消息，放行
-        if (isExemptImage(img)) return        // 表情/头像，放行给飞书
-        ev.stopPropagation();
-        ev.preventDefault();
-        toDataUrl(img, function (dataUrl) {
-            try {
-                ipcRenderer.send('open-image-window', dataUrl);
-            } catch (e) {
-                console.log('图片窗口 IPC 失败', e);
-            }
+    var elkSaveImageName = '';   // 右键保存时的原文件名（fiber mediaContent/name）
+    var sendImageSave = function (dataUrl, key) {
+        try {
+            ipcRenderer.send('save-image', JSON.stringify({ src: dataUrl, name: elkSaveImageName, key: key || '' }));
+        } catch (elk_e) {
+            console.log('elk save-image IPC 失败', elk_e);
+        }
+    };
+    // 右键"保存到本地"的路由键（三级取值见注入项点击处）；'*' 为通配
+    // 兜底——保存点击必然紧跟气泡点击触发解密，下一个就绪图即目标。
+    // 存盘后清除，恢复弹窗
+    var elkSaveImageKey = null;
+    // 抓取完成后关闭官方查看器：代点其关闭按钮（按钮随查看器被隐藏，
+    // 但 click 仍冒泡到 React root 委托触发组件 onClose，不经全局键盘
+    // 路由）；viewer-open 摘除即回普通聊天态，下次点图照常重新打开
+    var elkCloseViewer = function () {
+        if (document.body.className.indexOf('viewer-open') < 0) return;
+        var btn = document.querySelector('.viewer-close');
+        if (btn) btn.click();
+    };
+    var elkTryOpen = function () {
+        var host = document.getElementById('__lark-web-images-container__');
+        if (host == null) return;
+        var imgs = host.querySelectorAll('img[data-origin-key]');
+        for (var i = 0; i < imgs.length; i++) {
+            var im = imgs[i];
+            var key = im.getAttribute('data-origin-key');
+            var src = im.getAttribute('data-origin-url') || '';
+            if (!key || src.indexOf('blob:') !== 0) continue;   // 原图未就绪
+            (function (key, src) {   // 闭包捕获本次迭代的 key/src
+                blobToDataUrl(src, function (dataUrl) {
+                    if (!dataUrl) return;
+                    if (elkSaveImageKey === '*' || key === elkSaveImageKey) {
+                        elkSaveImageKey = null;
+                        sendImageSave(dataUrl, key);
+                    } else {
+                        sendImageWindow(dataUrl, key);
+                    }
+                    elkCloseViewer();
+                });
+            })(key, src);
+        }
+    };
+    // 容器随首次查看图片才创建（可能远晚于 DOMContentLoaded）：先挂 body
+    // observer 等它出现；出现即退役 body observer（容器一旦创建永不删除），
+    // 改盯容器自身并补扫一次——容器创建与内容填充常在同一批 mutation 完成，
+    // 改挂完成时内容已定稿、不会再有事件可触发，不补扫首击的图就漏掉
+    var elkImagesWatched = false;
+    var elkBodyObserver = null;
+    var elkWatchImages = function () {
+        if (elkImagesWatched) return;
+        var host = document.getElementById('__lark-web-images-container__');
+        if (host == null) return;
+        elkImagesWatched = true;
+        if (elkBodyObserver) { elkBodyObserver.disconnect(); elkBodyObserver = null; }
+        new MutationObserver(elkTryOpen).observe(host, {
+            childList: true, subtree: true,
+            attributes: true, attributeFilter: ['src', 'data-origin-url'],
         });
-    }, true);
+        elkTryOpen();
+    };
+    // observer 需 DOM ready 后挂（preload 在 document-start 跑，body 尚
+    // 为 null，同步 observe 抛异常会杀死后续 hook）
+    var elkInstallViewerWatch = function () {
+        elkHideViewer();
+        elkWatchImages();   // 容器可能早已存在（本次导航前看过图）
+        if (elkImagesWatched) return;
+        elkBodyObserver = new MutationObserver(elkWatchImages);
+        elkBodyObserver.observe(document.body, { childList: true, subtree: true });
+    };
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', elkInstallViewerWatch);
+    } else {
+        elkInstallViewerWatch();
+    }
 
-    // ---------- 聊天视频消息右键菜单：注入"保存到本地" ----------
-    // 官方"下载视频"被服务端权限拦截（视频可播放），这里克隆官方菜单项注入
-    // "保存到本地"，由主进程带登录态重拉流，按官方下载行为落盘。
-    // 流地址只取播放器产出的真实地址（不构造 API 直链，接口改版免适配）：
-    // 播放过直接读 <video>；未播放则点封面代播，挂载后立即暂停。
-    // 锚点文本 → 注入文案（跟随界面语言）；未播放时菜单无"下载视频"项，
-    // 锚到各语言最稳定的"转发"。文件消息不走此路：服务端按消息类型
-    // 403 拦截（视频放行、文件拒绝，已实测），客户端无法绕过。
+    // ---------- 消息右键菜单：注入"保存到本地"（视频/图片） ----------
+    // 官方"下载视频"被服务端权限拦截（视频可播放），这里克隆官方菜单项
+    // 注入"保存到本地"。视频由主进程带登录态重拉播放器流地址落盘（只取
+    // 播放器产出的真实地址，不构造 API 直链，接口改版免适配：播放过直接
+    // 读 <video>；未播放则点封面代播，挂载后立即暂停）。图片走隐藏查看
+    // 器抓原图存盘（见图片段）。锚点文本 → {kind, 注入文案}，跟随界面
+    // 语言，视频/图片各锚自己的官方下载项（"转发"两边的菜单都有，不能
+    // 当锚点）。文件消息不走此路：服务端按消息类型 403 拦截（视频放行、
+    // 文件拒绝，已实测），客户端无法绕过。
     var ELK_ANCHORS = {
-        '下载视频': '保存到本地', 'download video': 'Save to Disk',
-        '转发': '保存到本地', 'forward': 'Save to Disk',
+        '下载视频': { kind: 'video', text: '保存到本地' },
+        'download video': { kind: 'video', text: 'Save to Disk' },
+        '下载原图': { kind: 'image', text: '保存到本地' },
+        'download full image': { kind: 'image', text: 'Save to Disk' },
     };
     var ELK_MARK = 'data-elk-save-as';
     var elkMenuObserver = null;
@@ -207,13 +247,19 @@
     };
 
     var elkInject = function (anchor) {
+        var spec = ELK_ANCHORS[(anchor.textContent || '').trim().toLowerCase()];
+        if (!spec) return;
         if (anchor.parentElement.querySelector('[' + ELK_MARK + ']')) return;
-        var saveText = ELK_ANCHORS[(anchor.textContent || '').trim().toLowerCase()] || 'Save to Disk';
         var clone = anchor.cloneNode(true);   // 样式全带；不复制 React expando，对飞书惰性
-        clone.setAttribute(ELK_MARK, '1');
+        clone.setAttribute(ELK_MARK, spec.kind);
+        // 只替换非空文本节点：官方项里还有空文本节点（尾部
+        // ud__empty-inline-element 占位 SPAN 内），填入文字会把它撑到
+        // 200px+ 高，菜单出现"一大片空白"
         var walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
         var tn;
-        while ((tn = walker.nextNode())) tn.nodeValue = saveText;
+        while ((tn = walker.nextNode())) {
+            if ((tn.nodeValue || '').trim()) tn.nodeValue = spec.text;
+        }
         anchor.parentElement.insertBefore(clone, anchor.nextSibling);
     };
 
@@ -273,10 +319,12 @@
         return null;
     };
 
-    // 从消息气泡沿 fiber 上溯读元数据里的原始文件名（视频消息在
-    // content.mediaContent.name，Immutable Record 须经 .get 取值）。
-    // 仅作主进程的命名兜底，流地址本身仍只来自播放器
-    var elkFileNameFromFiber = function (start) {
+    // 从消息气泡沿 fiber 上溯读元数据（Immutable Record 须经 .get 取值）：
+    // 视频取 content.mediaContent.name / 图片取 content.name 作命名兜底。
+    // message prop 有两种形态：包裹 record（真身在 .message 键下）或消息
+    // record 本身（content 直接在其上）——两种都试；content 缺失不 break，
+    // 继续上溯找下一个带 message 的 fiber
+    var elkFromFiber = function (start, pick) {
         try {
             var n = start;
             for (var hop = 0; hop < 10 && n && n !== document.body; hop++, n = n.parentElement) {
@@ -288,17 +336,22 @@
                     var msg = f.memoizedProps && f.memoizedProps.message;
                     if (!msg || typeof msg.get !== 'function') continue;
                     var inner = msg.get('message');
-                    if (!inner || typeof inner.get !== 'function') break;
+                    if (!inner || typeof inner.get !== 'function') inner = msg;
                     var c = inner.get('content');
-                    if (!c || typeof c.get !== 'function') break;
-                    var mc = c.get('mediaContent');
-                    var name = (mc && typeof mc.get === 'function') ? mc.get('name') : '';
-                    if (!name) name = c.get('name');
-                    return (typeof name === 'string' && name) ? name : '';
+                    if (!c || typeof c.get !== 'function') continue;
+                    var v = pick(c);
+                    if (typeof v === 'string' && v) return v;
                 }
             }
-        } catch (e) { /* 结构改版时静默走时间戳兜底 */ }
+        } catch (e) { /* 结构改版时静默走兜底 */ }
         return '';
+    };
+    var elkFileNameFromFiber = function (start) {
+        return elkFromFiber(start, function (c) {
+            var mc = c.get('mediaContent');
+            var name = (mc && typeof mc.get === 'function') ? mc.get('name') : '';
+            return name || c.get('name');
+        });
     };
 
     // 关闭飞书菜单：克隆项无 React 事件，点击不会触发飞书自身的关闭逻辑，
@@ -344,13 +397,43 @@
         }, 200);
     };
 
-    // 注入项点击：捕获 + stopPropagation，飞书 root 委托收不到
+    // 注入项点击：捕获 + stopPropagation，飞书 root 委托收不到。
+    // kind=image：记 key/文件名后点气泡触发解密，observer 按 key 路由
+    // 存盘（见 elkTryOpen）；kind=video：走视频取流保存
     document.addEventListener('click', function (ev) {
         var t = ev.target;
         var hit = (t && t.closest) ? t.closest('[' + ELK_MARK + ']') : null;
         if (!hit) return;
         ev.stopPropagation();
         ev.preventDefault();
+        elkDismissMenu();
+        elkStopWatch();
+
+        if (hit.getAttribute(ELK_MARK) === 'image') {
+            // key 三级来源：①气泡 img 自带 data-lark-image-uri="imkey://<key>?"
+            // （image 消息与 post 富文本内嵌图统一有效，最稳）；②fiber
+            // content.image.origin.key（image 消息）；③'*' 通配兜底（下一次
+            // 就绪图即目标——保存点击必然紧跟气泡点击触发解密）
+            var bubble = elkCtxTarget && elkCtxTarget.tagName === 'IMG'
+                ? elkCtxTarget : (elkCtxContainer && elkCtxContainer.querySelector('img'));
+            var uriKey = '';
+            if (bubble) {
+                var uri = bubble.getAttribute('data-lark-image-uri') || '';
+                uriKey = uri.replace(/^imkey:\/\//, '').split('?')[0];
+            }
+            elkSaveImageKey = uriKey
+                || elkFromFiber(elkCtxContainer || elkCtxTarget, function (c) {
+                    var im = c.get('image');
+                    var origin = (im && typeof im.get === 'function') ? im.get('origin') : null;
+                    return (origin && typeof origin.get === 'function') ? origin.get('key') : '';
+                })
+                || '*';
+            // 文件名：fiber 读消息元数据（image 消息有 content.name）；post
+            // 内嵌图消息数据里本无文件名，留空交主进程用图片 key 尾段命名
+            elkSaveImageName = elkFileNameFromFiber(elkCtxContainer || elkCtxTarget);
+            if (bubble) bubble.click();
+            return;   // 图片分支到此为止；找不到气泡图时不落入视频路径
+        }
 
         var fileName = elkFileNameFromFiber(elkCtxContainer || elkCtxTarget);
         var send = function (srcUrl) {
@@ -381,7 +464,5 @@
         } else {
             send('');
         }
-        elkDismissMenu();
-        elkStopWatch();
     }, true);
 })();

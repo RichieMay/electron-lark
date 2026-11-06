@@ -670,8 +670,8 @@ function openImageWindow(src, key) {
     const win = new BrowserWindow({
         width: 900,
         height: 700,
-        minWidth: 200,
-        minHeight: 150,
+        minWidth: 400,
+        minHeight: 300,
         autoHideMenuBar: true,
         backgroundColor: '#1e1e1e',
         webPreferences: {

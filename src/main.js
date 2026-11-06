@@ -830,7 +830,13 @@ function maybeNotifyNewMessage(currentUnread) {
  */
 function showSystemNotify(opts) {
     if (!Notification.isSupported()) {
-        showPageToast((opts.title || '') + (opts.body ? '\n' + opts.body : ''), opts.toastLink)
+        if (opts.toastLink) {
+            // 链接型 toast：标题与链接合成一句"…，立即点击前往下载"，
+            // body(点击指引)不再重复展示
+            showPageToast((opts.title || '') + '，立即点击', opts.toastLink)
+        } else {
+            showPageToast((opts.title || '') + (opts.body ? '\n' + opts.body : ''))
+        }
         return null
     }
 

@@ -95,7 +95,7 @@
                 + 'font-size:14px;box-shadow:0 4px 16px rgba(0,0,0,0.3);'
                 + 'max-width:360px;line-height:1.5;white-space:pre-wrap;';
             if (typeof linkUrl === 'string' && /^https?:\/\//.test(linkUrl)) {
-                toast.appendChild(document.createTextNode(text + '，'));
+                toast.appendChild(document.createTextNode(text));
                 var a = document.createElement('a');
                 a.textContent = '前往下载';
                 a.href = '#';

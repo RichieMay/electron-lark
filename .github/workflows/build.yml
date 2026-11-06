@@ -98,7 +98,6 @@ jobs:
         with:
           files: |
             release-assets/*.exe
-            release-assets/*.blockmap
             release-assets/*.deb
             release-assets/latest.yml
           generate_release_notes: true

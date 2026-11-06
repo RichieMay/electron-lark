@@ -82,18 +82,32 @@
     // ---------- 主进程页面 toast ----------
     // 系统通知不可用（如 WSL 无通知服务）时，主进程经此通道在页面右下角
     // 弹 toast；页面内直接操作 DOM（executeJavaScript 在飞书 SSE 场景下
-    // 时序不可靠，见文件头注释）
-    ipcRenderer.on('page-toast', function (_ev, text) {
+    // 时序不可靠，见文件头注释）。
+    // linkUrl 可选：指定后 toast 末尾附可点的"前往下载"（open-external）
+    ipcRenderer.on('page-toast', function (_ev, text, linkUrl) {
         try {
             var old = document.getElementById('elk-toast');
             if (old) old.remove();
             var toast = document.createElement('div');
             toast.id = 'elk-toast';
-            toast.textContent = text;
             toast.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;'
                 + 'background:rgba(33,33,33,0.92);color:#fff;padding:12px 20px;border-radius:8px;'
                 + 'font-size:14px;box-shadow:0 4px 16px rgba(0,0,0,0.3);'
                 + 'max-width:360px;line-height:1.5;white-space:pre-wrap;';
+            if (typeof linkUrl === 'string' && /^https?:\/\//.test(linkUrl)) {
+                toast.appendChild(document.createTextNode(text + '，'));
+                var a = document.createElement('a');
+                a.textContent = '前往下载';
+                a.href = '#';
+                a.style.cssText = 'color:#7ab8ff;text-decoration:underline;white-space:nowrap;';
+                a.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    ipcRenderer.send('open-external', linkUrl);
+                });
+                toast.appendChild(a);
+            } else {
+                toast.textContent = text;
+            }
             document.body.appendChild(toast);
             setTimeout(function () { toast.remove(); }, 5000);
         } catch (e) { /* 页面卸载瞬间可忽略 */ }

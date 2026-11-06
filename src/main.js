@@ -543,8 +543,9 @@ function createMainWindow(config) {
     // 永不结束的资源加载（SSE 长连接等），事件可能永远不触发
     webContents.on('dom-ready', function () {
         startBadgePoll(!!config.showWarterMark)
-        updateChecker.checkInAppStart();
-        updateChecker.startDailyCheck();
+        // 静默更新检查：结果统一走 showUpdateResultToast（系统通知，失败落 toast）
+        updateChecker.checkInAppStart(showUpdateResultToast);
+        updateChecker.startDailyCheck(showUpdateResultToast);
     })
 
     // 飞书域名默认留在应用内打开：文件/预览链接若转交系统浏览器会丢失登录态，
@@ -823,13 +824,13 @@ function maybeNotifyNewMessage(currentUnread) {
 
 /**
  * 主进程弹系统通知的统一入口。
- * opts: { title, body, onClick }
- * 系统通知不可用（如 WSL 无通知服务）时退回主窗口右下角 toast，
- * 保证下载完成等结果始终可见（toast 不支持点击回调）。
+ * opts: { title, body, onClick, toastLink }
+ * 系统通知不可用（如 WSL 无通知服务）时退回主窗口右下角 toast；
+ * toastLink 可选，指定后 toast 内该链接可点（经 open-external 打开）
  */
 function showSystemNotify(opts) {
     if (!Notification.isSupported()) {
-        showPageToast((opts.title || '') + (opts.body ? '\n' + opts.body : ''))
+        showPageToast((opts.title || '') + (opts.body ? '\n' + opts.body : ''), opts.toastLink)
         return null
     }
 
@@ -856,24 +857,34 @@ function showSystemNotify(opts) {
 /**
  * 在主窗口(飞书页面)右下角弹纯文本 toast（更新结果等）。
  * 经 preload 的 IPC 通道渲染（executeJavaScript 在飞书 SSE 场景下
- * 时序不可靠，见 preload 头注释）；3.5 秒后自动消失
+ * 时序不可靠，见 preload 头注释）；5 秒后自动消失。
+ * linkUrl 可选：指定后 toast 末尾附可点的"前往下载"，点击经
+ * open-external 用系统浏览器打开
  */
-function showPageToast(text) {
+function showPageToast(text, linkUrl) {
     if (!mainAlive() || S.mainWebContents == null) return
-    S.mainWebContents.send('page-toast', text)
+    S.mainWebContents.send('page-toast', text, linkUrl)
 }
 
-// 把更新检查结果转为 toast 文案并展示
+// 更新检查结果展示的唯一入口（手动检查与静默检查共用）：
+// 统一走系统通知（与新消息通知同一链路），点击跳 Release 页；
+// 系统通知不可用时 showSystemNotify 自行退回 toast（带可点"前往下载"）
 function showUpdateResultToast(result) {
-    let text = ""
     if (result.type === 'newer') {
-        text = "发现新版本 " + (result.message.match(/[\d.]+.*?$/) || [''])[0] + "，可前往 GitHub 下载"
+        const copy = updateChecker.newerVersionCopy(result.version)
+        showSystemNotify({
+            title: copy.title,
+            body: copy.body,
+            onClick: function () {
+                shell.openExternal(updateChecker.RELEASE_PAGE_URL)
+            },
+            toastLink: updateChecker.RELEASE_PAGE_URL,
+        })
     } else if (result.type === 'latest') {
-        text = "当前已是最新版本"
+        showSystemNotify({ title: "当前已是最新版本" })
     } else {
-        text = "检查更新失败：" + result.message
+        showSystemNotify({ title: "检查更新失败", body: result.message })
     }
-    showPageToast(text)
 }
 
 // 通知点击：显示主窗口并注入 js 打开对应的聊天框
@@ -1045,7 +1056,7 @@ function registerIpcHandlers() {
     // 设置页发起的检查更新请求
     // 结果仅在主窗口右下角 toast 展示（设置页只保留"正在检查更新"提示）
     ipcMain.on("check-update", (event) => {
-        updateChecker.check(true, function () {}, showUpdateResultToast)
+        updateChecker.check(null, showUpdateResultToast)
         event.returnValue = 'ok'
     })
 

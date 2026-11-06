@@ -1,20 +1,18 @@
 const appStoreFs = require("fs");
 const path = require('path')
 const electron = require('electron');
-const Notification = electron.Notification;
 
-const appConf = require("./configuration")
+// Release 页地址与"发现新版本"文案的单一来源：
+// 静默检查(启动/每日)与手动检查(设置页)共用，改文案只动这里。
+// 本模块只负责检查并经 resultCb 上报结果，展示(系统通知/toast 兜底)
+// 统一在 main.js 完成
+const RELEASE_PAGE_URL = 'https://github.com/RichieMay/electron-lark/releases'
 
-// 统一构造带图标的系统通知
-function notify(title, body){
-    const n = new Notification({
-        title: title,
-        subtitle: title,
-        body: body,
-        icon: electron.nativeImage.createFromPath(appConf.dock32),
-    });
-    n.show();
-    return n;
+function newerVersionCopy(version) {
+    return {
+        title: "发现新版本 " + version,
+        body: "点击前往下载",
+    }
 }
 
 // 状态文件落 userData（安装目录不可写，不能用相对路径）。
@@ -49,7 +47,7 @@ function saveConfig(){
     })
 }
 
-function checkUpdateInAppStart(){
+function checkUpdateInAppStart(resultCb){
     function check(){
         if(updateCheckJson == null) return
 
@@ -58,10 +56,13 @@ function checkUpdateInAppStart(){
             updateCheckJson.lastCheckUpdateTimeStamp = 0;
         }
 
-        // 每次启动都静默检查（静默模式：无新版/失败都不打扰，仅发现新版本时通知）
-        checkUpdate(false, function(){
+        // 每次启动都静默检查。结果经 resultCb 交给调用方展示：
+        // 静默路径只对"发现新版本"出提示，latest/fail 不打扰
+        checkUpdate(function(){
             updateCheckJson.lastCheckUpdateTimeStamp = unixTimeStamp;
             saveConfig();
+        }, function(result){
+            if(result.type === 'newer' && typeof resultCb === 'function') resultCb(result)
         })
     }
 
@@ -77,7 +78,7 @@ function checkUpdateInAppStart(){
 const DAILY_CHECK_HOUR = 16;
 let dailyCheckTimer = null;
 
-function startDailyUpdateCheck(){
+function startDailyUpdateCheck(resultCb){
     // 页面重载等场景可能重复调用，已有定时器则跳过
     if(dailyCheckTimer != null) return;
 
@@ -90,11 +91,14 @@ function startDailyUpdateCheck(){
             next.setDate(next.getDate() + 1);
         }
         dailyCheckTimer = setTimeout(function(){
-            checkUpdate(false, function(){
+            checkUpdate(function(){
                 if(updateCheckJson != null){
                     updateCheckJson.lastCheckUpdateTimeStamp = Math.floor(new Date().getTime() / 1000);
                     saveConfig();
                 }
+            }, function(result){
+                // 静默路径只对"发现新版本"出提示
+                if(result.type === 'newer' && typeof resultCb === 'function') resultCb(result)
             });
             // 检查完排下一天
             scheduleNext();
@@ -104,9 +108,10 @@ function startDailyUpdateCheck(){
     scheduleNext();
 }
 
-// 参数: showCheckNotify 是否手动触发(弹系统通知); successCb 完成回调;
-//       resultCb 结果回调({type: newer/latest/fail, message}), 用于设置页内反馈(系统通知在部分环境会被静默)
-function checkUpdate(showCheckNotify, successCb, resultCb){
+// 参数: successCb 完成回调(可空);
+//       resultCb 结果回调({type: newer/latest/fail, version, message})，
+//       展示统一在 main.js（系统通知，不可用时落 toast）
+function checkUpdate(successCb, resultCb){
     if(successCb == undefined){
         successCb = function(){}
     }
@@ -117,7 +122,6 @@ function checkUpdate(showCheckNotify, successCb, resultCb){
     function notifyCheckFail(reason){
         console.log("检查更新失败: " + reason)
         resultCb({type: 'fail', message: reason})
-        if(showCheckNotify) notify("检查更新失败", reason);
     }
 
     // 用 electron.net 发起请求：走 Chromium 网络栈，自动使用系统代理，
@@ -177,15 +181,11 @@ function checkUpdate(showCheckNotify, successCb, resultCb){
                 .toLocaleLowerCase().replace("v", "");
 
             if(packageVersion != newVersion) {
-                resultCb({type: 'newer', message: "发现新版本 " + newVersion + "，可前往 GitHub Release 页下载"})
-                const updateNotify = notify("发现新版本", "发现新版本，请前往 GitHub Release 页下载");
-                updateNotify.addListener('click', function(){
-                    electron.shell.openExternal('https://github.com/RichieMay/electron-lark/releases')
-                });
+                const copy = newerVersionCopy(newVersion)
+                resultCb({type: 'newer', version: newVersion, message: copy.title + "，" + copy.body})
 
             } else {
                 resultCb({type: 'latest', message: "当前已是最新版本"})
-                if(showCheckNotify) notify("当前已是最新版本", "当前已是最新版本");
             }
 
             successCb();
@@ -206,4 +206,6 @@ module.exports = {
     checkInAppStart: checkUpdateInAppStart,
     startDailyCheck: startDailyUpdateCheck,
     check: checkUpdate,
+    RELEASE_PAGE_URL: RELEASE_PAGE_URL,
+    newerVersionCopy: newerVersionCopy,
 }
